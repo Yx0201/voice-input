@@ -1,3 +1,10 @@
+# 内部工程文档(本地保留,不入库)
+AGENTS.md
+ARCHITECTURE.md
+Memory/
+specCoding/
+docs/
+
 # 二进制与构建产物
 voice-input
 *.o
