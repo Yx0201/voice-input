@@ -27,6 +27,34 @@ type fileSpec struct {
 // Progress 回调:当前文件名、已完成字节、总字节(未知为 -1)。
 type Progress func(file string, done, total int64)
 
+// ModelsReady 本地识别模型是否齐备(SenseVoice + VAD)。
+func ModelsReady(cfg config.Config) bool {
+	specs := []struct {
+		dest     string
+		minBytes int64
+	}{
+		{filepath.Join(cfg.ModelDir, "model.int8.onnx"), 150_000_000},
+		{filepath.Join(cfg.ModelDir, "tokens.txt"), 100_000},
+		{filepath.Join(cfg.VADDir, "silero_vad.onnx"), 1_500_000},
+	}
+	for _, s := range specs {
+		if fi, err := os.Stat(s.dest); err != nil || fi.Size() < s.minBytes {
+			return false
+		}
+	}
+	return true
+}
+
+// EnsureVAD 只下载缺失的 VAD 断句模型(1.7MB)——云端引擎用户无需下载 228MB 识别模型。
+func EnsureVAD(cfg config.Config, progress Progress) error {
+	dest := filepath.Join(cfg.VADDir, "silero_vad.onnx")
+	if fi, err := os.Stat(dest); err == nil && fi.Size() >= 1_500_000 {
+		return nil
+	}
+	return download([]string{"https://hf-mirror.com", "https://huggingface.co"},
+		fileSpec{fmt.Sprintf("%s/resolve/main/silero_vad.onnx", vadRepo), dest, 1_500_000}, progress)
+}
+
 // EnsureModels 检查模型文件,缺失的自动下载。全部就绪返回 nil。
 func EnsureModels(cfg config.Config, progress Progress) error {
 	specs := []fileSpec{
