@@ -1,0 +1,19 @@
+# 二进制与构建产物
+voice-input
+*.o
+*.a
+VoiceInput.app/
+VoiceInput-dist/
+VoiceInput-dist.zip
+
+# 本地配置(含密钥)
+.env
+*.local.json
+
+# 模型缓存
+models/
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
