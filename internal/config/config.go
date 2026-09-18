@@ -17,8 +17,10 @@ type Config struct {
 	ModelDir string `json:"model_dir"`
 	// VADDir 覆盖 VAD 模型目录,默认 ~/.voice_input/models/vad。
 	VADDir string `json:"vad_dir"`
-	// DashScopeAPIKey 百炼密钥;复用 chat-elf 的 key,也可从 DASHSCOPE_API_KEY 环境变量读。
+	// DashScopeAPIKey 百炼密钥;可存钥匙串(菜单切换云端时弹窗输入后自动保存)。
 	DashScopeAPIKey string `json:"dashscope_api_key"`
+	// DashScopeWorkspaceID 百炼业务空间 ID(可选);配置后走专属端点。
+	DashScopeWorkspaceID string `json:"dashscope_workspace_id"`
 	// DashScopeModel 云端 ASR 模型名。
 	DashScopeModel string `json:"dashscope_model"`
 	// Region 百炼地域。
@@ -85,5 +87,29 @@ func Load() Config {
 	if v := os.Getenv("VOICE_INPUT_VAD_DIR"); v != "" {
 		cfg.VADDir = v
 	}
+	if v := os.Getenv("DASHSCOPE_WORKSPACE_ID"); v != "" {
+		cfg.DashScopeWorkspaceID = v
+	}
 	return cfg
+}
+
+// PatchConfig 修改 ~/.voice_input/config.json 中的指定字段(文件不存在则创建),
+// 用于持久化菜单里的运行时选择(如引擎切换)。
+func PatchConfig(patch map[string]any) error {
+	path := filepath.Join(DefaultDir(), "config.json")
+	m := map[string]any{}
+	if raw, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(raw, &m) // 解析失败则从空配置开始
+	}
+	for k, v := range patch {
+		m[k] = v
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(DefaultDir(), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }

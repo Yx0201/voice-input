@@ -14,7 +14,7 @@
 - **本地识别,隐私优先**:SenseVoice-Small 离线引擎,音频不出本机(M4 Pro 上 4 秒音频识别仅 77ms,快过实时 50 倍)
 - **自动断句**:silero VAD 检测停顿,说完一句自动出一句,自带标点与数字规整
 - **全局热键**:`Ctrl + Option + V` 随时开/关听写(暂停时释放麦克风,状态栏橙点消失)
-- **引擎可插拔**:本地 SenseVoice 开箱即用;云端引擎(阿里百炼 qwen-audio-3.0-asr-flash)开发中
+- **双引擎,菜单一键切换**:本地 SenseVoice(离线、隐私、~100ms)⇄ 云端百炼 `qwen-audio-3.0-asr-flash`(复杂长句更准);云端密钥弹窗输入后**加密存入 macOS 钥匙串**,切换选择自动持久化
 - **缺失模型自动下载**:首次运行引导下载,无需手动找模型
 - **稳定签名方案**:本地证书签名,重编译不掉权限(详见下文"签名"一节)
 
@@ -96,15 +96,26 @@ open VoiceInput.app   # 或 Finder 双击
   "hotkey_modifiers": ["ctrl", "alt"],
   "hotkey_key": "v",
   "dashscope_api_key": "",
+  "dashscope_workspace_id": "",
   "dashscope_model": "qwen-audio-3.0-asr-flash",
   "region": "cn-beijing"
 }
 ```
 
-- `engine`:`local`(默认)/ `cloud`(云端引擎,开发中)
+- `engine`:`local`(默认)/ `cloud`(云端引擎)。菜单切换会自动写回此字段
 - `input_device`:输入设备名子串匹配(如 `"AirPods"`);空 = 系统默认。启动日志会列出全部可用设备
 - `hotkey_*`:全局热键,修饰键可选 `ctrl` / `alt`(Option)/ `shift` / `cmd`
-- 环境变量覆盖:`VOICE_INPUT_ENGINE`、`DASHSCOPE_API_KEY`、`VOICE_INPUT_MODEL_DIR`、`VOICE_INPUT_VAD_DIR`
+- `dashscope_api_key`:更推荐留空——首次在菜单切换云端引擎时弹窗输入,自动加密保存到 macOS 钥匙串,不落明文文件
+- `dashscope_workspace_id`:可选,百炼业务空间 ID(配置后走专属端点)
+- 环境变量覆盖:`VOICE_INPUT_ENGINE`、`DASHSCOPE_API_KEY`、`DASHSCOPE_WORKSPACE_ID`、`VOICE_INPUT_MODEL_DIR`、`VOICE_INPUT_VAD_DIR`
+
+### 云端引擎使用
+
+1. 菜单栏 🎙 → **切换引擎** → **云端(百炼·高质量)**
+2. 首次切换弹窗输入 API Key([百炼控制台](https://bailian.console.aliyun.com)获取,sk- 开头)→ 保存,自动存入钥匙串
+3. 之后正常说话即可;随时切回本地(无需网络、完全离线)
+
+云端引擎特点:识别质量更高(方言、专业词、长句),但音频会上云且需要网络;本地引擎全部在本机完成。
 
 ## macOS 权限与签名(重要,请阅读)
 
@@ -183,7 +194,7 @@ Apple M4 Pro / SenseVoice-Small int8 / 单线程 CPU:
 - [x] 本地引擎全链路(热键 → 采音 → VAD → 识别 → 注入)
 - [x] 菜单栏应用 + 稳定签名 + 私域分发
 - [x] 模型缺失自动下载
-- [ ] 云端引擎(qwen-audio-3.0-asr-flash,菜单栏一键切换)
+- [x] 云端引擎(qwen-audio-3.0-asr-flash,菜单栏一键切换,密钥存钥匙串)
 - [ ] 按住说话(push-to-talk)模式
 - [ ] Intel Mac 支持
 - [ ] 正式 .icns 图标 / 开机自启
