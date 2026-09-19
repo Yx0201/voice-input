@@ -869,24 +869,74 @@ func (d *dictation) setListening(on bool) {
 	} else {
 		d.listening.Store(false)
 
-		// 流式会话收尾:提交剩余 partial 并关闭
-		d.streamMu.Lock()
-		if d.streamSession != nil {
-			d.commitExact(d.streamSession.Partial())
-			_ = d.streamSession.Close()
-			d.streamSession = nil
-			d.committed, d.lastPartial = "", ""
-		}
-		d.streamMu.Unlock()
-
+		// 松开/暂停:先关麦(状态栏橙点立即熄灭),收尾全部异步——
+		// 在途识别与打字不被阻断(按住说话松手后文字仍会补完)
 		if d.micReady.Load() {
 			if err := d.mic.Stop(); err != nil {
 				appLog.Printf("⚠️ 暂停麦克风失败: %v", err)
 			}
 		}
-		appLog.Printf("⏸  听写已暂停")
+
+		if d.streamingMode.Load() {
+			// 流式:立即换新会话位,旧会话后台收尾(等云端吐完最后结果)
+			d.streamMu.Lock()
+			sess := d.streamSession
+			startTyped := d.committed
+			d.streamSession = nil
+			d.committed, d.lastPartial = "", ""
+			d.streamMu.Unlock()
+			if sess != nil {
+				go d.drainSession(sess, startTyped)
+			}
+		} else if d.detector != nil {
+			// 整句:补静音强制收割尾段,转写异步进行
+			if eng := d.currentEngine(); eng != nil {
+				for _, seg := range d.detector.Flush() {
+					go transcribeAndType(eng, seg)
+				}
+			}
+		}
+		appLog.Printf("⏸  听写已暂停(在途识别继续)")
 	}
 	d.refreshMenu()
+}
+
+// drainSession 后台收尾一个流式会话:轮询 partial/endpoint,把剩余文字补打进
+// 输入框后关闭会话。startTyped 为松手前已打进的部分,只补增量。
+func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
+	if sess == nil {
+		return
+	}
+	defer func() {
+		_ = sess.Close()
+		appLog.Printf("🎙 会话收尾完成")
+	}()
+	typed := startTyped
+	granted := inject.IsAccessibilityGranted()
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if sess.Endpoint() {
+			final := strings.TrimSpace(sess.Finalize())
+			if final != "" && granted {
+				if strings.HasPrefix(final, typed) {
+					if delta := final[len(typed):]; delta != "" {
+						inject.TypeText(delta)
+					}
+				} else if typed == "" {
+					inject.TypeText(final)
+				} else {
+					appLog.Printf("⚠️ 定稿与已提交不一致(保留已提交):已=%q 定=%q", typed, final)
+				}
+			}
+			return
+		}
+		if p := sess.Partial(); granted && strings.HasPrefix(p, typed) && len(p) > len(typed) {
+			inject.TypeText(p[len(typed):])
+			typed = p
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	appLog.Printf("⚠️ 会话收尾超时(8s),丢弃未返回的尾部")
 }
 
 // refreshMenu 更新菜单栏文案。

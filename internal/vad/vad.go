@@ -93,3 +93,21 @@ func (d *Detector) Reset() {
 		d.vad = nil
 	}
 }
+
+// Flush 强制收割未完结的语音段(按住说话松开时调用):
+// 补喂约 0.8s 静音触发端点,返回切出的段落并重置状态。
+func (d *Detector) Flush() [][]float32 {
+	if d.vad == nil {
+		return nil
+	}
+	silence := make([]float32, d.window*25) // 512 采样/窗 × 25 ≈ 0.8s
+	var out [][]float32
+	for i := 0; i < 2; i++ { // 最多补 ~1.6s 静音
+		out = append(out, d.Feed(silence)...)
+		if len(out) > 0 {
+			break
+		}
+	}
+	d.Reset()
+	return out
+}
