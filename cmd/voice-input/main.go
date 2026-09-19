@@ -19,6 +19,7 @@ import (
 	"voice_input/internal/config"
 	"voice_input/internal/inject"
 	"voice_input/internal/keystore"
+	"voice_input/internal/overlay"
 	"voice_input/internal/setup"
 	"voice_input/internal/vad"
 )
@@ -51,6 +52,13 @@ func main() {
 			os.Exit(2)
 		}
 		runStreamTest(os.Args[2])
+	case "overlaytest":
+		caretOK := overlay.SelfTest()
+		if caretOK {
+			fmt.Println("✅ 光标定位成功,loading 悬浮层已在光标旁显示 3 秒")
+		} else {
+			fmt.Println("⚠️ 光标定位失败(该应用不支持辅助功能定位),已用屏幕右下角兜底显示 3 秒")
+		}
 	case "app":
 		runApp()
 	default:
@@ -270,7 +278,11 @@ func runListen() {
 }
 
 // transcribeAndType 转写一段语音并注入焦点输入框,打印状态行。
+// 识别期间在光标旁显示 loading 悬浮层(告知"AI 在转,不是卡死")。
 func transcribeAndType(engine asr.Engine, seg []float32) {
+	done := overlay.Busy()
+	defer done()
+
 	dur := time.Duration(len(seg)) * time.Second / sampleRate
 	start := time.Now()
 	text, err := engine.Transcribe(seg, sampleRate)

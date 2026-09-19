@@ -30,6 +30,7 @@ import (
 	"voice_input/internal/hotkey"
 	"voice_input/internal/inject"
 	"voice_input/internal/keystore"
+	"voice_input/internal/overlay"
 	"voice_input/internal/setup"
 	"voice_input/internal/vad"
 )
@@ -903,10 +904,13 @@ func (d *dictation) setListening(on bool) {
 
 // drainSession 后台收尾一个流式会话:轮询 partial/endpoint,把剩余文字补打进
 // 输入框后关闭会话。startTyped 为松手前已打进的部分,只补增量。
+// 全程在光标旁显示 loading(松手后仍在转换的可视反馈)。
 func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 	if sess == nil {
 		return
 	}
+	busy := overlay.Busy()
+	defer busy()
 	defer func() {
 		_ = sess.Close()
 		appLog.Printf("🎙 会话收尾完成")
