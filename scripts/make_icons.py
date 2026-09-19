@@ -117,29 +117,26 @@ def make_app_icon(variant):
 
 
 def make_menu_icon():
-    """菜单栏模板:纯黑剪影(小尺寸下填充比描边清晰)。"""
-    big = 512
+    """菜单栏模板图标:与应用图标(方案B)同构——左麦克风 + 右三行文字 + 光标。
+    纯黑 + alpha(template 自动适配深浅);描边加粗保证 16pt 下可辨;
+    输出宽幅 PNG(NSImage 直接渲染,保持横向比例)。"""
+    big = 1024
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img, "RGBA")
-    k = big / 1024
     black = (0, 0, 0, 255)
-    # 实心胶囊 + 弧 + 柱 + 座(加粗,16px 下可辨)
-    draw.rounded_rectangle(
-        [(512 - 80) * k, (460 - 232) * k, (512 + 80) * k, (460 + 72) * k],
-        radius=80 * k, fill=black)
-    r = 200 * k
-    draw.arc([(512 * k - r, 460 * k - r), (512 * k + r, 460 * k + r)],
-             start=8, end=172, fill=black, width=int(96 * k))
-    wl = int(96 * k)
-
-    def line(x1, y1, x2, y2):
-        draw.line([(x1 * k, y1 * k), (x2 * k, y2 * k)], fill=black, width=wl)
-        rr = wl / 2
-        for x, y in ((x1, y1), (x2, y2)):
-            draw.ellipse([(x * k - rr, y * k - rr), (x * k + rr, y * k + rr)], fill=black)
-
-    line(512, 660, 512, 764)
-    line(388, 764, 636, 764)
+    draw_concept_b(draw, 1.0, black, stroke=64)
+    # 按内容紧裁,留 6% 边距
+    bbox = img.getbbox()
+    if bbox:
+        pad_x = int((bbox[2] - bbox[0]) * 0.06)
+        pad_y = int((bbox[3] - bbox[1]) * 0.06)
+        bbox = (max(0, bbox[0] - pad_x), max(0, bbox[1] - pad_y),
+                min(big, bbox[2] + pad_x), min(big, bbox[3] + pad_y))
+        img = img.crop(bbox)
+    # 统一放大到约 2x 渲染精度(高度 ~720px)
+    target_h = 720
+    scale = target_h / img.height
+    img = img.resize((int(img.width * scale), target_h), Image.LANCZOS)
     return img
 
 
@@ -165,9 +162,10 @@ def write_preview(apps: dict, menu: Image.Image):
         img.resize((512, 512), Image.LANCZOS).save(prev / f"app_icon_{name}.png")
     bar_light = Image.new("RGBA", (480, 44), (245, 245, 247, 255))
     bar_dark = Image.new("RGBA", (480, 44), (28, 28, 30, 255))
-    m = menu.resize((32, 32), Image.LANCZOS)
-    bar_light.paste(m, (16, 6), m)
-    bar_dark.paste(m, (16, 6), m)
+    mh = 26  # 模拟菜单栏 13pt(2x)
+    m = menu.resize((int(menu.width * mh / menu.height), mh), Image.LANCZOS)
+    bar_light.paste(m, (16, (44 - mh) // 2), m)
+    bar_dark.paste(m, (16, (44 - mh) // 2), m)
     bar_light.save(prev / "menubar_light.png")
     bar_dark.save(prev / "menubar_dark.png")
 
@@ -184,13 +182,15 @@ def main():
     chosen.save(tmp)
     build_iconset(tmp, ROOT / "packaging" / "AppIcon.icns")
 
-    tmp_menu = ROOT / "cmd" / "voice-input" / "assets" / "_menu_512.png"
-    tmp_menu.parent.mkdir(parents=True, exist_ok=True)
-    menu.save(tmp_menu)
-    build_iconset(tmp_menu, ROOT / "cmd" / "voice-input" / "assets" / "menu.icns")
+    # 菜单栏图标:宽幅模板 PNG(NSImage 直接渲染)
+    menu_path = ROOT / "cmd" / "voice-input" / "assets" / "menu.png"
+    menu_path.parent.mkdir(parents=True, exist_ok=True)
+    menu.save(menu_path)
+    old_icns = ROOT / "cmd" / "voice-input" / "assets" / "menu.icns"
+    if old_icns.exists():
+        old_icns.unlink()
     tmp.unlink()
-    tmp_menu.unlink()
-    print(f"✅ 图标生成(VARIANT={VARIANT}):packaging/AppIcon.icns + assets/menu.icns;双概念预览在 build/preview/")
+    print(f"✅ 图标生成(VARIANT={VARIANT}):packaging/AppIcon.icns + assets/menu.png;双概念预览在 build/preview/")
 
 
 if __name__ == "__main__":
