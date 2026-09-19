@@ -13,5 +13,7 @@ int overlay_caret_position(double *x, double *y);
 void overlay_fallback_position(double *x, double *y);
 // 在当前线程驱动主 runloop 秒数(CLI 自检用:让 dispatch 的 UI 任务得以执行)
 void overlay_run_loop_for(double seconds);
+// 悬浮窗当前是否可见(调试自检)
+int overlay_panel_visible(void);
 
 #endif
