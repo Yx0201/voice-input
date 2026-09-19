@@ -61,11 +61,11 @@ def _hline(draw, k, color, w, x1, x2, y):
 
 
 def _capsule_mic(draw, k, color, stroke, cx, top, r_cradle):
-    """空心胶囊 + 托架弧(无线柱),几何按 1024 基准坐标传入。"""
+    """实心胶囊(麦克风头,经典画法——空心会像温度计)+ 托架弧。"""
     w = int(stroke * k)
     draw.rounded_rectangle(
         [(cx - 76) * k, top * k, (cx + 76) * k, (top + 296) * k],
-        radius=76 * k, outline=color, width=w)
+        radius=76 * k, fill=color)
     cyc = top + 296 - 76  # 托架圆心 = 胶囊底部圆心
     r = r_cradle * k
     draw.arc([(cx * k - r, cyc * k - r), (cx * k + r, cyc * k + r)],
