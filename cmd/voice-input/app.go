@@ -332,7 +332,7 @@ func (d *dictation) initEngine() error {
 
 // onReady 配置菜单栏(systray 就绪后回调)。
 func (d *dictation) onReady() {
-	systray.SetTitle("🎙")
+	systray.SetTemplateIcon(menuIcon, menuIcon)
 	systray.SetTooltip("voice-input 语音听写")
 
 	d.mStatus = systray.AddMenuItem("启动中……", "当前状态")

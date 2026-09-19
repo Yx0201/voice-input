@@ -16,6 +16,8 @@
 	<string>APPL</string>
 	<key>CFBundleExecutable</key>
 	<string>voice-input</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<!-- 后台工具:不占 Dock,只驻菜单栏 -->

@@ -26,9 +26,10 @@ run: build
 #   3) ad-hoc 签名,让 TCC 权限记录更稳定
 app: build
 	@rm -rf $(APP_NAME)
-	@mkdir -p $(APP_NAME)/Contents/MacOS $(APP_NAME)/Contents/Frameworks
+	@mkdir -p $(APP_NAME)/Contents/MacOS $(APP_NAME)/Contents/Frameworks $(APP_NAME)/Contents/Resources
 	@cp $(BINARY) $(APP_NAME)/Contents/MacOS/
 	@cp packaging/Info.plist $(APP_NAME)/Contents/Info.plist
+	@cp packaging/AppIcon.icns $(APP_NAME)/Contents/Resources/AppIcon.icns
 	@LIB_DIR=$$(ls -d $$($(GO) env GOMODCACHE)/github.com/k2-fsa/sherpa-onnx-go-macos@*/lib/aarch64-apple-darwin 2>/dev/null | tail -1); \
 	if [ -z "$$LIB_DIR" ]; then echo "❌ 找不到 sherpa-onnx 预编译库(先 make build)"; exit 1; fi; \
 	cp "$$LIB_DIR/libsherpa-onnx-c-api.dylib" "$$LIB_DIR/libonnxruntime.dylib" $(APP_NAME)/Contents/Frameworks/
