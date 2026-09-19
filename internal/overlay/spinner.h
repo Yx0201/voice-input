@@ -9,6 +9,8 @@ void overlay_show_at(double x, double y);
 void overlay_hide(void);
 // 取当前焦点文本框光标的屏幕坐标(AppKit 原点);成功返回 1
 int overlay_caret_position(double *x, double *y);
+// 最近一次光标查询的诊断信息(失败步骤/AX 错误码)
+const char *overlay_caret_debug(void);
 // 兜底位置(主屏右下角,AppKit 原点)
 void overlay_fallback_position(double *x, double *y);
 // 在当前线程驱动主 runloop 秒数(CLI 自检用:让 dispatch 的 UI 任务得以执行)

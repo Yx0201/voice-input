@@ -58,7 +58,7 @@ func show() {
 		C.overlay_fallback_position(&x, &y)
 	}
 	C.overlay_show_at(x, y)
-	log.Printf("[overlay] show @%.0f,%.0f caret=%v", float64(x), float64(y), caretOK)
+	log.Printf("[overlay] show @%.0f,%.0f caret=%v ax=%s", float64(x), float64(y), caretOK, C.GoString(C.overlay_caret_debug()))
 }
 
 func hide() {
@@ -76,8 +76,8 @@ func SelfTest() (caretOK bool) {
 	}
 	C.overlay_show_at(x, y)
 	C.overlay_run_loop_for(0.5)
-	log.Printf("[overlay] 自检:位置 %.0f,%.0f caret=%v panelVisible=%d",
-		float64(x), float64(y), caretOK, C.overlay_panel_visible())
+	log.Printf("[overlay] 自检:位置 %.0f,%.0f caret=%v ax=%s panelVisible=%d",
+		float64(x), float64(y), caretOK, C.GoString(C.overlay_caret_debug()), C.overlay_panel_visible())
 	C.overlay_run_loop_for(2.5)
 	C.overlay_hide()
 	C.overlay_run_loop_for(0.2)

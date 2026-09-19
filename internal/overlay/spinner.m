@@ -61,40 +61,61 @@ void overlay_hide(void) {
 
 // 焦点文本框内光标(选区)的屏幕矩形。AX 返回的是 CG 坐标(左上原点),
 // 这里转换为 AppKit 坐标(左下原点)。
-static CGRect caretScreenRect(void) {
-	AXUIElementRef sys = AXUIElementCreateSystemWide();
-	AXUIElementRef focused = NULL;
-	CGRect rect = CGRectNull;
-	if (sys) {
-		AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute, (CFTypeRef *)&focused);
-		CFRelease(sys);
-	}
-	if (!focused) return rect;
+// caretDebug 记录最近一次查询失败在哪一步、AX 错误码(供 Go 侧日志排障)。
+static char caretDebug[160] = "not-run";
 
-	AXValueRef rangeVal = NULL;
-	AXUIElementCopyAttributeValue(focused, kAXSelectedTextRangeAttribute, (CFTypeRef *)&rangeVal);
-	if (rangeVal) {
-		AXValueRef boundsVal = NULL;
-		AXUIElementCopyParameterizedAttributeValue(focused,
-			kAXBoundsForRangeParameterizedAttribute, rangeVal, (CFTypeRef *)&boundsVal);
-		if (boundsVal) {
-			AXValueGetValue(boundsVal, kAXValueCGRectType, &rect);
-			CFRelease(boundsVal);
-		}
-		CFRelease(rangeVal);
-	}
-	CFRelease(focused);
-	return rect;
+static CGRect caretScreenRect(void) {
+    CGRect rect = CGRectNull;
+    AXUIElementRef sys = AXUIElementCreateSystemWide();
+    if (!sys) { snprintf(caretDebug, sizeof caretDebug, "syswide=create-failed"); return rect; }
+
+    AXUIElementRef focused = NULL;
+    AXError e1 = AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute, (CFTypeRef *)&focused);
+    CFRelease(sys);
+    if (e1 != kAXErrorSuccess || !focused) {
+        snprintf(caretDebug, sizeof caretDebug, "focused-elem err=%d", (int)e1);
+        return rect;
+    }
+
+    AXValueRef rangeVal = NULL;
+    AXError e2 = AXUIElementCopyAttributeValue(focused, kAXSelectedTextRangeAttribute, (CFTypeRef *)&rangeVal);
+    if (e2 != kAXErrorSuccess || !rangeVal) {
+        snprintf(caretDebug, sizeof caretDebug, "selrange err=%d", (int)e2);
+        CFRelease(focused);
+        return rect;
+    }
+
+    AXValueRef boundsVal = NULL;
+    AXError e3 = AXUIElementCopyParameterizedAttributeValue(focused,
+        kAXBoundsForRangeParameterizedAttribute, rangeVal, (CFTypeRef *)&boundsVal);
+    CFRelease(rangeVal);
+    if (e3 != kAXErrorSuccess || !boundsVal) {
+        snprintf(caretDebug, sizeof caretDebug, "bounds err=%d", (int)e3);
+        CFRelease(focused);
+        return rect;
+    }
+    AXValueGetValue(boundsVal, kAXValueCGRectType, &rect);
+    CFRelease(boundsVal);
+    CFRelease(focused);
+    snprintf(caretDebug, sizeof caretDebug, "ok w=%.0f h=%.0f", rect.size.width, rect.size.height);
+    return rect;
+}
+
+// 最近一次光标查询的诊断信息(失败步骤/错误码,或成功时的矩形尺寸)
+const char *overlay_caret_debug(void) {
+    return caretDebug;
 }
 
 int overlay_caret_position(double *x, double *y) {
-	CGRect r = caretScreenRect();
-	if (CGRectIsNull(r) || r.size.width <= 0) return 0;
-	CGFloat screenHeight = [NSScreen mainScreen].frame.size.height;
-	// CG(左上原点) → AppKit(左下原点);放在光标右侧、垂直居中
-	*x = (double)(r.origin.x + r.size.width + 6);
-	*y = (double)(screenHeight - (r.origin.y + r.size.height) + r.size.height / 2 - 12);
-	return 1;
+    CGRect r = caretScreenRect();
+    // 空选区(纯插入点)的矩形宽度为 0、只有行高——听写场景几乎总是这种,
+    // 判定成功与否看高度;width=0 时 x 就取行首。
+    if (CGRectIsNull(r) || r.size.height <= 0) return 0;
+    CGFloat screenHeight = [NSScreen mainScreen].frame.size.height;
+    // CG(左上原点) → AppKit(左下原点);放在光标右侧、垂直居中
+    *x = (double)(r.origin.x + r.size.width + 6);
+    *y = (double)(screenHeight - (r.origin.y + r.size.height) + r.size.height / 2 - 12);
+    return 1;
 }
 
 void overlay_fallback_position(double *x, double *y) {
