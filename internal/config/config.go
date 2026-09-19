@@ -27,8 +27,14 @@ type Config struct {
 	Region string `json:"region"`
 	// HotkeyModifiers 全局热键修饰键(ctrl/alt/shift/cmd),默认 ["ctrl","alt"]。
 	HotkeyModifiers []string `json:"hotkey_modifiers"`
-	// HotkeyKey 全局热键主键(字母/数字),默认 "v"。
+	// HotkeyKey 全局热键主键(字母/数字/"space"),默认 "v"。
 	HotkeyKey string `json:"hotkey_key"`
+	// HotkeyMode 触发方式:"toggle"(组合键切换,默认)/ "ptt"(按住说话)。
+	HotkeyMode string `json:"hotkey_mode"`
+	// PttModifiers 按住说话的修饰键(默认 ["option"])。
+	PttModifiers []string `json:"ptt_modifiers"`
+	// PttKey 按住说话的主键(默认 "space")。
+	PttKey string `json:"ptt_key"`
 	// InputDevice 指定输入设备(设备名子串匹配,如 "AirPods");空 = 系统默认输入。
 	InputDevice string `json:"input_device"`
 	// DictationMode 听写模式:"streaming"(即时出字,默认)/ "sentence"(完整句,更准)。
@@ -63,6 +69,9 @@ func defaultConfig() Config {
 		Region:          "cn-beijing",
 		HotkeyModifiers: []string{"ctrl", "alt"},
 		HotkeyKey:       "v",
+		HotkeyMode:      "toggle",
+		PttModifiers:    []string{"option"},
+		PttKey:          "space",
 		DictationMode:   "streaming",
 	}
 }

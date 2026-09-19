@@ -80,6 +80,12 @@ type dictation struct {
 	mEngCloud *systray.MenuItem
 	mModeStream   *systray.MenuItem
 	mModeSentence *systray.MenuItem
+	mTrigToggle *systray.MenuItem
+	mTrigPtt    *systray.MenuItem
+
+	// 触发方式:toggle(组合键切换)/ ptt(按住说话)
+	hotkeyMode    atomic.Value // string
+	hotkeyRestart chan struct{}
 }
 
 // currentEngine 读取当前引擎(线程安全)。
@@ -106,9 +112,11 @@ func runApp() {
 		cfg.Engine, cfg.ModelDir, cfg.HotkeyModifiers, cfg.HotkeyKey)
 
 	d := &dictation{
-		cfg:     cfg,
-		audioCh: make(chan []float32, 128),
+		cfg:           cfg,
+		audioCh:       make(chan []float32, 128),
+		hotkeyRestart: make(chan struct{}, 1),
 	}
+	d.hotkeyMode.Store(cfg.HotkeyMode)
 
 	// 引擎失败不退出:菜单栏起来后引导配置;任一引擎可用即自动开麦
 	d.streamingMode.Store(cfg.DictationMode != "sentence")
@@ -350,6 +358,12 @@ func (d *dictation) onReady() {
 	d.mModeStream = mMode.AddSubMenuItemCheckbox("即时出字(流式)", "边说边出字,落后语音约半秒", d.streamingMode.Load())
 	d.mModeSentence = mMode.AddSubMenuItemCheckbox("完整句(更准)", "说完一句再出字,识别更稳", !d.streamingMode.Load())
 
+	// 触发方式子菜单(组合键切换/按住说话)
+	ptt := d.hotkeyMode.Load() == "ptt"
+	mTrig := systray.AddMenuItem("触发方式", "组合键切换 / 按住说话")
+	d.mTrigToggle = mTrig.AddSubMenuItemCheckbox("组合键切换(Ctrl+Option+V)", "按一下开,再按一下关", !ptt)
+	d.mTrigPtt = mTrig.AddSubMenuItemCheckbox("按住说话(Option+空格)", "按住收音,松开结束;按键不会向输入框打出空格", ptt)
+
 	mAX := systray.AddMenuItem("请求辅助功能授权…", "热键与文字注入需要;弹窗被顶掉时可点这里重新唤起")
 	mHelp := systray.AddMenuItem("❓ 使用帮助", "配置指引:本地模型下载 / 云端 Key 申请")
 	systray.AddSeparator()
@@ -370,6 +384,10 @@ func (d *dictation) onReady() {
 				go d.setDictationMode("streaming")
 			case <-d.mModeSentence.ClickedCh:
 				go d.setDictationMode("sentence")
+			case <-d.mTrigToggle.ClickedCh:
+				go d.setHotkeyMode("toggle")
+			case <-d.mTrigPtt.ClickedCh:
+				go d.setHotkeyMode("ptt")
 			case <-mHelp.ClickedCh:
 				go d.showHelp()
 			case <-mAX.ClickedCh:
@@ -393,6 +411,7 @@ func (d *dictation) onReady() {
 	go d.hotkeyLoop()
 
 	// 启动即用策略:任一引擎就绪则自动开麦;两者皆无则待配置,不占麦克风
+	// 例外:按住说话(ptt)模式下保持静默,等用户按键
 	if (d.streamingMode.Load() && d.streamEng != nil) || (!d.streamingMode.Load() && d.currentEngine() != nil) {
 		// 下载入口可见性:当前模式所需模型齐备才隐藏(流式还需流式模型)
 		needDownload := !setup.ModelsReady(d.cfg) ||
@@ -400,7 +419,12 @@ func (d *dictation) onReady() {
 		if !needDownload {
 			d.mDownload.Hide()
 		}
-		go d.enableListening()
+		if d.hotkeyMode.Load() == "ptt" {
+			d.mStatus.SetTitle("🎙 按住 Option+空格 说话")
+			d.mToggle.SetTitle("开启听写(手动)")
+		} else {
+			go d.enableListening()
+		}
 	} else {
 		d.mStatus.SetTitle("⚠️ 未配置引擎——见「❓ 使用帮助」")
 		d.mToggle.SetTitle("开启听写(需先配置)")
@@ -692,24 +716,85 @@ func (d *dictation) startMic() error {
 	return nil
 }
 
-// hotkeyLoop 注册并监听全局热键(自研 CGEventTap),每次按下切换听写状态。
-// 注册失败(典型原因:辅助功能尚未授权)时每 5 秒重试。
+// hotkeyLoop 热键监督循环:按当前触发方式(toggle/ptt)注册监听;
+// 模式切换时热重配(Stop→重注册);注册失败每 5 秒重试。
 func (d *dictation) hotkeyLoop() {
-	combo := fmtModifiers(d.cfg.HotkeyModifiers) + "+" + d.cfg.HotkeyKey
-
 	failLogged := false
 	for {
-		err := hotkey.Listen(d.cfg.HotkeyModifiers, d.cfg.HotkeyKey, d.toggle, func() {
-			appLog.Printf("⌨️  热键已生效: %s 切换听写", combo)
-		})
-		if err == nil {
-			return // Listen 正常情况永不返回
+		mode, _ := d.hotkeyMode.Load().(string)
+		done := make(chan struct{})
+
+		go func(mode string, done chan struct{}) {
+			defer close(done)
+			var err error
+			if mode == "ptt" {
+				err = hotkey.ListenPTT(d.cfg.PttModifiers, d.cfg.PttKey,
+					func() { d.setListening(true) },  // 按下:开麦
+					func() { d.setListening(false) }, // 松开:结束并定稿
+					func() {
+						appLog.Printf("⌨️  按住说话已生效: %s+%s(松开结束;按键不会打出空格)",
+							fmtModifiers(d.cfg.PttModifiers), orDefault(d.cfg.PttKey, "space"))
+					})
+			} else {
+				combo := fmtModifiers(d.cfg.HotkeyModifiers) + "+" + d.cfg.HotkeyKey
+				err = hotkey.Listen(d.cfg.HotkeyModifiers, d.cfg.HotkeyKey, d.toggle, func() {
+					appLog.Printf("⌨️  热键已生效: %s 切换听写", combo)
+				})
+			}
+			if err != nil && !failLogged {
+				appLog.Printf("⌨️  热键注册失败(%v),每 5 秒重试——辅助功能授权后自动生效", err)
+				failLogged = true
+			}
+		}(mode, done)
+
+		select {
+		case <-d.hotkeyRestart: // 模式切换:停旧起新
+			hotkey.Stop()
+			<-done
+			failLogged = false
+		case <-done: // 注册失败退出,稍后重试
+			time.Sleep(5 * time.Second)
 		}
-		if !failLogged {
-			appLog.Printf("⌨️  热键注册失败(%v),每 5 秒重试——辅助功能授权后自动生效", err)
-			failLogged = true
-		}
-		time.Sleep(5 * time.Second)
+	}
+}
+
+// setHotkeyMode 菜单切换触发方式(组合键切换 ⇄ 按住说话),热重配热键并持久化。
+func (d *dictation) setHotkeyMode(mode string) {
+	cur, _ := d.hotkeyMode.Load().(string)
+	if mode == cur {
+		d.syncTrigMenu()
+		return
+	}
+	// 切到按住说话:先停常开听写,保持静默直到用户按键
+	if mode == "ptt" && d.listening.Load() {
+		d.setListening(false)
+	}
+	d.hotkeyMode.Store(mode)
+	select {
+	case d.hotkeyRestart <- struct{}{}:
+	default:
+	}
+	d.syncTrigMenu()
+	_ = config.PatchConfig(map[string]any{"hotkey_mode": mode})
+	if mode == "ptt" {
+		d.mStatus.SetTitle("🎙 按住 Option+空格 说话")
+		appLog.Printf("⌨️  触发方式 → 按住说话(%s+%s)", fmtModifiers(d.cfg.PttModifiers), d.cfg.PttKey)
+	} else {
+		appLog.Printf("⌨️  触发方式 → 组合键切换(%s+%s)", fmtModifiers(d.cfg.HotkeyModifiers), d.cfg.HotkeyKey)
+	}
+}
+
+// syncTrigMenu 触发方式子菜单勾选与实际一致。
+func (d *dictation) syncTrigMenu() {
+	if d.mTrigPtt == nil {
+		return
+	}
+	if d.hotkeyMode.Load() == "ptt" {
+		d.mTrigPtt.Check()
+		d.mTrigToggle.Uncheck()
+	} else {
+		d.mTrigToggle.Check()
+		d.mTrigPtt.Uncheck()
 	}
 }
 
@@ -723,7 +808,14 @@ func (d *dictation) toggle() {
 }
 
 // setListening 设置状态并同步麦克风占用与菜单显示。
+// 幂等:重复开/关直接返回(按住说话的按键自动重复依赖此保护)。
 func (d *dictation) setListening(on bool) {
+	if on && d.listening.Load() {
+		return
+	}
+	if !on && !d.listening.Load() {
+		return
+	}
 	if on {
 		if d.streamingMode.Load() {
 			d.streamMu.Lock()
