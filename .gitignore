@@ -5,8 +5,9 @@ Memory/
 specCoding/
 docs/
 
-# 二进制与构建产物
-voice-input
+# 二进制与构建产物(锚定根目录:裸二进制名为 voice-input,
+# 不带斜杠会误伤 cmd/voice-input/ 源码目录——曾导致入口代码从未入库)
+/voice-input
 *.o
 *.a
 VoiceInput.app/
