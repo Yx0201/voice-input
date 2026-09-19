@@ -47,6 +47,26 @@ func ModelsReady(cfg config.Config) bool {
 	return true
 }
 
+// StreamingModelsReady 本地流式模型(streaming-paraformer)是否齐备。
+func StreamingModelsReady() bool {
+	dir := filepath.Join(config.DefaultDir(), "models", streamingDir)
+	specs := []struct {
+		name     string
+		minBytes int64
+	}{
+		{"encoder.int8.onnx", 50_000_000},
+		{"decoder.int8.onnx", 500_000},
+		{"tokens.txt", 50_000},
+	}
+	for _, s := range specs {
+		fi, err := os.Stat(filepath.Join(dir, s.name))
+		if err != nil || fi.Size() < s.minBytes {
+			return false
+		}
+	}
+	return true
+}
+
 // EnsureVAD 只下载缺失的 VAD 断句模型(1.7MB)——云端引擎用户无需下载 228MB 识别模型。
 func EnsureVAD(cfg config.Config, progress Progress) error {
 	dest := filepath.Join(cfg.VADDir, "silero_vad.onnx")

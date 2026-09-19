@@ -1,34 +1,42 @@
 #!/bin/bash
-# 备用模型安装脚本(新版应用可自动下载模型,本脚本仅作离线兜底)。
-# 设计原则:非破坏性——已存在完整模型时不做任何删改;只在缺失时复制,
-# 复制后必须验证,杜绝"删了旧的、拷不上新的"的删库风险。
+# 备用模型安装脚本(新版应用可自动下载模型,本脚本为离线兜底/一键配齐)。
+# 设计原则:非破坏性、支持升级——按模型族逐一检查,已存在跳过,缺失才复制;
+# 复制后验证。旧版用户(只有整句模型)重跑本脚本即可补齐流式模型。
 set -u
 
-MODELS_SRC="$(cd "$(dirname "$0")/.." && pwd)/models"
+MODELS_SRC="$(cd "$(dirname "$0")" && pwd)/models"
 DEST_DIR="$HOME/.voice_input/models"
 
-# 必须在解压出的分发包内运行(上级目录有 models/)
-if [ ! -f "$MODELS_SRC/sense-voice/model.int8.onnx" ]; then
+if [ ! -d "$MODELS_SRC" ]; then
   echo "❌ 未找到模型文件,请在解压出的 VoiceInput-dist 文件夹内双击本脚本"
   exit 1
 fi
+mkdir -p "$DEST_DIR"
 
-# 已装好 → 直接通过
-if [ -f "$DEST_DIR/sense-voice/model.int8.onnx" ] && [ -f "$DEST_DIR/sense-voice/tokens.txt" ]; then
-  echo "✅ 模型已存在,无需安装"
-  exit 0
-fi
+FAILED=0
+copy_if_missing() { # $1=模型族目录名 $2=标志性文件
+  if [ -f "$DEST_DIR/$1/$2" ]; then
+    echo "✅ $1 已存在,跳过"
+  elif [ -d "$MODELS_SRC/$1" ]; then
+    rm -rf "$DEST_DIR/$1" # 清理可能的半截安装
+    cp -R "$MODELS_SRC/$1" "$DEST_DIR/$1"
+    if [ -f "$DEST_DIR/$1/$2" ]; then
+      echo "✅ $1 已安装($(du -sh "$DEST_DIR/$1" | cut -f1))"
+    else
+      echo "❌ $1 安装异常"
+      FAILED=1
+    fi
+  fi
+}
 
-mkdir -p "$HOME/.voice_input"
-# 走到这里说明目标缺失(可能是半截安装):清掉不完整的,重新完整复制
-rm -rf "$DEST_DIR"
-cp -R "$MODELS_SRC" "$DEST_DIR"
+copy_if_missing sense-voice         model.int8.onnx    # 整句引擎
+copy_if_missing streaming-paraformer encoder.int8.onnx # 流式引擎
+copy_if_missing vad                 silero_vad.onnx    # 断句(整句模式)
 
-# 复制后验证
-if [ -f "$DEST_DIR/sense-voice/model.int8.onnx" ] && [ -f "$DEST_DIR/sense-voice/tokens.txt" ]; then
-  echo "✅ 模型安装完成($(du -sh "$DEST_DIR" | cut -f1))"
-  echo "现在双击 VoiceInput.app 启动(首次需授权 麦克风 + 辅助功能)"
+if [ "$FAILED" -eq 0 ]; then
+  echo "🎉 模型全部就绪——双击 VoiceInput.app 启动"
+  echo "   首次需授权:麦克风 + 辅助功能;云端引擎:菜单「切换引擎→云端」输入 Key"
 else
-  echo "❌ 安装异常。备选方案:打开 VoiceInput.app,点菜单里的「下载缺失模型」自动下载"
+  echo "备选方案:打开 VoiceInput.app,点菜单「⬇️ 下载缺失模型」自动下载"
   exit 1
 fi

@@ -172,6 +172,9 @@ func (d *dictation) setDictationMode(mode string) {
 	if streaming {
 		if err := d.initStreaming(); err != nil {
 			appLog.Printf("⚠️ 流式引擎未就绪: %v", err)
+			if d.mDownload != nil {
+				d.mDownload.Show()
+			}
 		} else {
 			appLog.Printf("⚡ 已切换到即时出字模式(%s)", d.streamEng.Name())
 		}
@@ -391,7 +394,10 @@ func (d *dictation) onReady() {
 
 	// 启动即用策略:任一引擎就绪则自动开麦;两者皆无则待配置,不占麦克风
 	if (d.streamingMode.Load() && d.streamEng != nil) || (!d.streamingMode.Load() && d.currentEngine() != nil) {
-		if setup.ModelsReady(d.cfg) {
+		// 下载入口可见性:当前模式所需模型齐备才隐藏(流式还需流式模型)
+		needDownload := !setup.ModelsReady(d.cfg) ||
+			(d.streamingMode.Load() && d.cfg.Engine != "cloud" && !setup.StreamingModelsReady())
+		if !needDownload {
 			d.mDownload.Hide()
 		}
 		go d.enableListening()
