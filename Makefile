@@ -45,6 +45,12 @@ app: build
 		echo "✅ 打包完成: $(APP_NAME)(⚠️ ad-hoc 签名,TCC 授权会随重编译失效,建议跑 scripts/make-dev-cert.sh)"; \
 	fi
 
+# 安装/更新到 /Applications(先停运行中的实例,再替换)
+install: app
+	@pkill -f "/Applications/$(APP_NAME)/Contents/MacOS" 2>/dev/null; sleep 1; \
+	rm -rf "/Applications/$(APP_NAME)" && cp -R $(APP_NAME) /Applications/ && \
+	echo "✅ 已安装到 /Applications/$(APP_NAME)(旧实例已停止,可双击启动)"
+
 clean:
 	rm -f $(BINARY)
 	rm -rf $(APP_NAME)
