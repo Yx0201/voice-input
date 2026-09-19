@@ -12,7 +12,8 @@
 
 - **双击即用**:打包成菜单栏应用,不占 Dock;**任一引擎就绪(本地模型或云端 Key)自动开始听写**,均未配置时不占用麦克风并弹出配置指引
 - **本地识别,隐私优先**:SenseVoice-Small 离线引擎,音频不出本机(M4 Pro 上 4 秒音频识别仅 77ms,快过实时 50 倍)
-- **自动断句**:silero VAD 检测停顿,说完一句自动出一句,自带标点与数字规整
+- **即时出字(流式,默认)**:边说边出字,落后语音约半秒(微信式体验);本地流式(paraformer)与云端流式(qwen-audio-3.0-asr-flash-streaming)均可,稳定前缀增量注入、永不回删
+- **完整句模式(菜单备选)**:说完一句再出字,SenseVoice 整句识别更稳
 - **全局热键**:`Ctrl + Option + V` 随时开/关听写(暂停时释放麦克风,状态栏橙点消失)
 - **双引擎,菜单一键切换**:本地 SenseVoice(离线、隐私、~100ms)⇄ 云端百炼 `qwen-audio-3.0-asr-flash`(复杂长句更准);云端密钥弹窗输入后**加密存入 macOS 钥匙串**,切换选择自动持久化
 - **缺失模型自动下载**:首次运行引导下载,无需手动找模型
@@ -68,11 +69,18 @@ open VoiceInput.app   # 或 Finder 双击
 
 `make setup` / 应用内下载 / `voice-input setup` 三者等效,均为自动下载以下文件:
 
-| 文件 | 大小 | 用途 | 手动下载(hf-mirror)| 手动下载(HuggingFace) |
-|---|---|---|---|---|
-| `model.int8.onnx` | 228M | SenseVoice-Small int8 识别模型(中/英/日/韩/粤语) | [链接](https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx) | [链接](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx) |
-| `tokens.txt` | 308K | 词表/分词文件 | [链接](https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt) | [链接](https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt) |
-| `silero_vad.onnx` | 1.7M | 语音活动检测(断句) | [链接](https://hf-mirror.com/csukuangfj/vad/resolve/main/silero_vad.onnx) | [链接](https://huggingface.co/csukuangfj/vad/resolve/main/silero_vad.onnx) |
+| 文件 | 大小 | 用途 | 手动下载(hf-mirror)|
+|---|---|---|---|
+| `model.int8.onnx` | 228M | SenseVoice 整句引擎(中/英/日/韩/粤) | [链接](https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx) |
+| `encoder/decoder.int8.onnx` + `tokens.txt` | 158M+68M | streaming-paraformer 流式引擎(中英) | [仓库](https://hf-mirror.com/csukuangfj/sherpa-onnx-streaming-paraformer-bilingual-zh-en) |
+| `silero_vad.onnx` | 1.7M | 语音活动检测(整句模式断句) | [链接](https://hf-mirror.com/csukuangfj/vad/resolve/main/silero_vad.onnx) |
+
+```
+~/.voice_input/models/
+├── sense-voice/          # 整句引擎
+├── streaming-paraformer/ # 流式引擎(encoder/decoder/tokens)
+└── vad/                  # silero(整句模式用)
+```
 
 存放位置:
 
@@ -92,6 +100,7 @@ open VoiceInput.app   # 或 Finder 双击
 ```json
 {
   "engine": "local",
+  "dictation_mode": "streaming",
   "input_device": "",
   "hotkey_modifiers": ["ctrl", "alt"],
   "hotkey_key": "v",
@@ -103,6 +112,7 @@ open VoiceInput.app   # 或 Finder 双击
 ```
 
 - `engine`:`local`(默认)/ `cloud`(云端引擎)。菜单切换会自动写回此字段
+- `dictation_mode`:`streaming`(即时出字,默认)/ `sentence`(完整句,更准)——菜单「听写模式」切换自动写回
 - `input_device`:输入设备名子串匹配(如 `"AirPods"`);空 = 系统默认。启动日志会列出全部可用设备
 - `hotkey_*`:全局热键,修饰键可选 `ctrl` / `alt`(Option)/ `shift` / `cmd`
 - `dashscope_api_key`:更推荐留空——首次在菜单切换云端引擎时弹窗输入,自动加密保存到 macOS 钥匙串,不落明文文件
@@ -195,6 +205,7 @@ Apple M4 Pro / SenseVoice-Small int8 / 单线程 CPU:
 - [x] 菜单栏应用 + 稳定签名 + 私域分发
 - [x] 模型缺失自动下载
 - [x] 云端引擎(qwen-audio-3.0-asr-flash,菜单栏一键切换,密钥存钥匙串)
+- [x] 流式听写(边说边出字):本地 paraformer + 云端 flash-streaming 双实现
 - [ ] 按住说话(push-to-talk)模式
 - [ ] Intel Mac 支持
 - [ ] 正式 .icns 图标 / 开机自启

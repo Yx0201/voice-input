@@ -6,6 +6,7 @@ require (
 	fyne.io/systray v1.12.2
 	github.com/gen2brain/malgo v0.11.26
 	github.com/go-audio/wav v1.1.0
+	github.com/gorilla/websocket v1.5.3
 	github.com/k2-fsa/sherpa-onnx-go-macos v1.13.8
 )
 

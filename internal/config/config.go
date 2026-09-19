@@ -31,6 +31,8 @@ type Config struct {
 	HotkeyKey string `json:"hotkey_key"`
 	// InputDevice 指定输入设备(设备名子串匹配,如 "AirPods");空 = 系统默认输入。
 	InputDevice string `json:"input_device"`
+	// DictationMode 听写模式:"streaming"(即时出字,默认)/ "sentence"(完整句,更准)。
+	DictationMode string `json:"dictation_mode"`
 }
 
 // DefaultDir 返回数据根目录 ~/.voice_input。
@@ -61,6 +63,7 @@ func defaultConfig() Config {
 		Region:          "cn-beijing",
 		HotkeyModifiers: []string{"ctrl", "alt"},
 		HotkeyKey:       "v",
+		DictationMode:   "streaming",
 	}
 }
 
@@ -89,6 +92,9 @@ func Load() Config {
 	}
 	if v := os.Getenv("DASHSCOPE_WORKSPACE_ID"); v != "" {
 		cfg.DashScopeWorkspaceID = v
+	}
+	if v := os.Getenv("VOICE_INPUT_DICTATION_MODE"); v != "" {
+		cfg.DictationMode = v
 	}
 	return cfg
 }
