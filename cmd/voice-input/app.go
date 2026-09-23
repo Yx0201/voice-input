@@ -286,7 +286,7 @@ func (d *dictation) streamFeed(pcm []float32) {
 		return // 会话在 setListening(true) 创建;此处防御
 	}
 	d.streamSession.Feed(pcm, sampleRate)
-	d.commitStable(d.streamSession.Partial())
+	d.commitStable(d.streamSession.Partial(), d.streamSession.PartialReliable())
 
 	if d.streamSession.Endpoint() {
 		final := d.streamSession.Finalize()
@@ -301,7 +301,9 @@ func (d *dictation) streamFeed(pcm []float32) {
 // commitStable 计算 partial 的稳定前缀并增量注入(永不回删)。
 // 稳定判定:① 最后一个句读标点之前(含);② 连续两次 partial 公共前缀(≥2 新字);
 // ③ 兜底:未提交部分超过 6 字时整段提交(防无标点长句迟迟不出字)。
-func (d *dictation) commitStable(partial string) {
+// reliable=false(云端 partial 会回改早前文字)时只用规则①:预览提前提交
+// 未定稿文字会被服务端重写,已提交前缀一旦失配,打字守卫会永久卡死。
+func (d *dictation) commitStable(partial string, reliable bool) {
 	if partial == "" {
 		return
 	}
@@ -309,13 +311,15 @@ func (d *dictation) commitStable(partial string) {
 	if i := strings.LastIndexAny(partial, streamPuncts); i >= 0 {
 		stable = partial[:i+1]
 	}
-	if stable == "" {
-		if cp := commonPrefix(d.lastPartial, partial); len([]rune(cp))-len([]rune(d.committed)) >= 2 {
-			stable = cp
+	if reliable {
+		if stable == "" {
+			if cp := commonPrefix(d.lastPartial, partial); len([]rune(cp))-len([]rune(d.committed)) >= 2 {
+				stable = cp
+			}
 		}
-	}
-	if stable == "" && len([]rune(partial))-len([]rune(d.committed)) >= 6 {
-		stable = partial
+		if stable == "" && len([]rune(partial))-len([]rune(d.committed)) >= 6 {
+			stable = partial
+		}
 	}
 	d.lastPartial = partial
 
@@ -604,6 +608,9 @@ func (d *dictation) switchEngine(which string) {
 		d.syncEngineMenu("local")
 		appLog.Printf("🏠 已切换到本地引擎: %s", eng.Name())
 	}
+	// 内存必须同步更新:下方 initStreaming 按 cfg.Engine 重建流式引擎,
+	// 只写文件不更新内存会让流式引擎滞后一次切换(菜单"本地"实际跑云端)。
+	d.cfg.Engine = which
 	_ = config.PatchConfig(map[string]any{"engine": which})
 
 	// 引擎变化后重建流式引擎(流式模式下会话依赖引擎)
@@ -988,6 +995,9 @@ func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 	}()
 	typed := startTyped
 	granted := inject.IsAccessibilityGranted()
+	// 声明音频结束:本地流补尾垫静音冲刷解码,端点检测才能触发定稿;
+	// 不调的话 Endpoint 永不为真,只能干等 8s 超时(文字早已打完,loading 空转)。
+	sess.FinishInput()
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		if sess.Endpoint() {

@@ -18,8 +18,15 @@ import (
 // StreamingSession 一个说话会话。生命周期 = 一次连续听写(开始→暂停/退出)。
 // 接口约定:Feed 只投递不阻塞消费方;Partial 返回当前句累积文本;
 // Endpoint 为真后调用 Finalize 取定稿文本并继续同一会话;Close 结束会话。
+// FinishInput 声明"不再有音频"(松手关麦后调用):本地实现补尾垫静音冲刷
+// 解码缓冲,否则端点检测看不到尾随静音、Endpoint 永不触发。
+// PartialReliable 报告 Partial 文本是否只增不改:本地 paraformatter 分段内
+// append-only(可靠,可激进预览提交);云端 partial 会回改早前文字(不可靠,
+// 只能按标点锚定做保守预览,否则已提交前缀被重写后打字守卫永久卡死)。
 type StreamingSession interface {
 	Feed(pcm []float32, sampleRate int)
+	FinishInput()
+	PartialReliable() bool
 	Partial() string
 	Endpoint() bool
 	Finalize() string
@@ -106,6 +113,24 @@ func (s *localStreamSession) Feed(pcm []float32, sampleRate int) {
 		s.engine.recognizer.Decode(s.stream)
 	}
 }
+
+// FinishInput 本地实现:显式补足静音并冲刷到定稿。静音量按最坏情况算:
+// Rule1 要 0.8s 尾静音,而块解码会"吃掉"最多两块(chunk=61 帧≈0.61s×2——
+// 尾字 token 的非空白帧位置记在发射时刻、不足一块的尾帧默认不解码),
+// 因此喂 2.5s 保证端点必触发;is_final 让最后不足一块的帧也参与解码,
+// 尾部文字不再滞留缓冲(v1.13.8 paraformer 支持的每流选项)。
+func (s *localStreamSession) FinishInput() {
+	s.stream.AcceptWaveform(16000, make([]float32, 40000)) // 2.5s 零值=静音
+	s.stream.SetOption("is_final", "1")
+	s.stream.InputFinished()
+	for s.engine.recognizer.IsReady(s.stream) {
+		s.engine.recognizer.Decode(s.stream)
+	}
+}
+
+// PartialReliable 本地 partial 分段内 append-only(sherpa tokens 只增,
+// 30s 连续语音 + 变长块 + 双会话探针验证无前缀回退)。
+func (s *localStreamSession) PartialReliable() bool { return true }
 
 // Partial 当前累积识别文本。
 func (s *localStreamSession) Partial() string {

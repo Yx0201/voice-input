@@ -170,7 +170,8 @@ type cloudStreamSession struct {
 	conn   *websocket.Conn
 	taskID string
 
-	writeMu     sync.Mutex // 串行化 WebSocket 写(音频帧与控制消息)
+	writeMu     sync.Mutex // 串行化 WebSocket 写(音频帧与控制消息);finished 也由它保护
+	finished    bool       // finish-task 是否已发出(FinishInput 提前发,Close 不重复)
 	mu          sync.Mutex // 保护以下字段
 	partialText string
 	finalText   string
@@ -198,6 +199,25 @@ func (s *cloudStreamSession) Feed(pcm []float32, sampleRate int) {
 	_ = s.conn.WriteMessage(websocket.BinaryMessage, buf)
 }
 
+// FinishInput 云端实现:立即发 finish-task,让服务端冲刷并定稿最后一句。
+// 不发的话服务端等不到更多音频也不定稿,收尾只能干等超时,尾句被吞。
+func (s *cloudStreamSession) FinishInput() {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	if s.finished {
+		return
+	}
+	s.finished = true
+	_ = s.conn.WriteJSON(wsMessage{
+		Header:  wsHeader{Action: "finish-task", TaskID: s.taskID, Streaming: "duplex"},
+		Payload: wsPayload{Input: wsInput{}},
+	})
+}
+
+// PartialReliable 云端 partial 不可靠:服务端会回改已出现过的文字
+// (实测"刘氏"→"楼市"级别的同音改写),激进预览提交会被回写卡死。
+func (s *cloudStreamSession) PartialReliable() bool { return false }
+
 // Partial 当前句累积文本(sentence_end 后自动清零,归属下一句)。
 func (s *cloudStreamSession) Partial() string {
 	s.mu.Lock()
@@ -223,12 +243,9 @@ func (s *cloudStreamSession) Finalize() string {
 	return t
 }
 
-// Close 发送 finish-task 并关闭连接。
+// Close 确保任务结束(finish-task 已在 FinishInput 发过则不重发)并关闭连接。
 func (s *cloudStreamSession) Close() error {
-	_ = s.writeJSON(wsMessage{
-		Header:  wsHeader{Action: "finish-task", TaskID: s.taskID, Streaming: "duplex"},
-		Payload: wsPayload{Input: wsInput{}},
-	})
+	s.FinishInput()
 	s.shutdown()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -253,6 +270,13 @@ func (s *cloudStreamSession) readLoop() {
 			}
 			s.mu.Lock()
 			s.lastErr = err
+			// 连接已断不会再有结果:未定稿的 partial 升级为最终文本,
+			// 并置 endpoint 让收尾轮询立即退出(网络中断时胶囊不空等超时)。
+			if s.partialText != "" {
+				s.finalText = s.partialText
+				s.partialText = ""
+			}
+			s.endpoint = true
 			s.mu.Unlock()
 			return
 		}
@@ -281,6 +305,11 @@ func (s *cloudStreamSession) readLoop() {
 			}
 			s.mu.Unlock()
 		case "task-finished":
+			// 任务结束不会再有结果:置 endpoint 让收尾轮询立即退出,
+			// 而不是干等 8s 超时(如纯静默松手、无尾句可定稿的场景)。
+			s.mu.Lock()
+			s.endpoint = true
+			s.mu.Unlock()
 			return
 		case "task-failed":
 			err := fmt.Errorf("百炼任务失败 %s: %s", msg.Header.ErrorCode, msg.Header.ErrorMessage)
