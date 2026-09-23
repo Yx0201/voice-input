@@ -1,10 +1,26 @@
 #!/bin/bash
-# 备用模型安装脚本(新版应用可自动下载模型,本脚本为离线兜底/一键配齐)。
-# 设计原则:非破坏性、支持升级——按模型族逐一检查,已存在跳过,缺失才复制;
-# 复制后验证。旧版用户(只有整句模型)重跑本脚本即可补齐流式模型。
+# 一键安装/升级脚本:①替换 /Applications 里的 VoiceInput.app 为包内最新版
+# (停旧进程→删旧→拷新);②补齐缺失模型(离线兜底,已存在跳过——旧版
+# 用户重跑即可补齐流式模型)。应用内亦可菜单「⬇️ 下载缺失模型」在线拉取。
 set -u
 
-MODELS_SRC="$(cd "$(dirname "$0")" && pwd)/models"
+SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+MODELS_SRC="$SRC_DIR/models"
+
+# --- 应用替换:老版本用户重跑本脚本即升级到包内最新版 ---
+APP_SRC="$SRC_DIR/VoiceInput.app"
+if [ -d "$APP_SRC" ]; then
+  pkill -f "/Applications/VoiceInput.app/Contents/MacOS" 2>/dev/null
+  sleep 1
+  rm -rf /Applications/VoiceInput.app
+  cp -R "$APP_SRC" /Applications/
+  if [ -d "/Applications/VoiceInput.app/Contents/MacOS" ]; then
+    echo "✅ VoiceInput.app 已更新到 /Applications(旧实例已停止)"
+  else
+    echo "❌ 应用复制异常,请手动拖入 /Applications"
+    exit 1
+  fi
+fi
 DEST_DIR="$HOME/.voice_input/models"
 
 if [ ! -d "$MODELS_SRC" ]; then
@@ -34,7 +50,7 @@ copy_if_missing streaming-paraformer encoder.int8.onnx # 流式引擎
 copy_if_missing vad                 silero_vad.onnx    # 断句(整句模式)
 
 if [ "$FAILED" -eq 0 ]; then
-  echo "🎉 模型全部就绪——双击 VoiceInput.app 启动"
+  echo "🎉 模型全部就绪,应用已是最新——双击 /Applications/VoiceInput.app 启动"
   echo "   首次需授权:麦克风 + 辅助功能;云端引擎:菜单「切换引擎→云端」输入 Key"
 else
   echo "备选方案:打开 VoiceInput.app,点菜单「⬇️ 下载缺失模型」自动下载"

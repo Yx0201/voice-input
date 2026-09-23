@@ -27,3 +27,6 @@ models/
 .vscode/
 build/
 packaging/_appicon_1024.png
+
+# Python 字节码缓存
+__pycache__/
