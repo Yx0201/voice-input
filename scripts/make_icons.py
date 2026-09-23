@@ -114,8 +114,10 @@ def make_menu_template(thick: int = 2) -> Image.Image:
     h = target_h * SS + 8 * SS
     canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(canvas)
-    draw_bars(d, bars, scale, 4 * SS - left * scale, (h - (bot - top + 1) * scale) / 2,
-              (0, 0, 0, 255))
+    # oy 必须像 ox 一样减去内容起点 top*scale:draw_bars 内部画在 oy + top*scale,
+    # 只传居中值会把整体内容画低、底部超出画布被裁(表现为菜单栏图标下沉贴底)。
+    draw_bars(d, bars, scale, 4 * SS - left * scale,
+              (h - (bot - top + 1) * scale) / 2 - top * scale, (0, 0, 0, 255))
     return canvas.resize((w // SS, h // SS), Image.LANCZOS)
 
 
