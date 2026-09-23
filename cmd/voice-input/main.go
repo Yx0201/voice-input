@@ -15,11 +15,11 @@ import (
 	"time"
 
 	"voice_input/internal/asr"
+	"voice_input/internal/capsule"
 	"voice_input/internal/capture"
 	"voice_input/internal/config"
 	"voice_input/internal/inject"
 	"voice_input/internal/keystore"
-	"voice_input/internal/overlay"
 	"voice_input/internal/setup"
 	"voice_input/internal/vad"
 )
@@ -52,13 +52,9 @@ func main() {
 			os.Exit(2)
 		}
 		runStreamTest(os.Args[2])
-	case "overlaytest":
-		caretOK := overlay.SelfTest()
-		if caretOK {
-			fmt.Println("✅ 光标定位成功,loading 悬浮层已在光标旁显示 3 秒")
-		} else {
-			fmt.Println("⚠️ 光标定位失败(该应用不支持辅助功能定位),已用屏幕右下角兜底显示 3 秒")
-		}
+	case "capsuletest":
+		capsule.SelfTest()
+		fmt.Println("✅ 声音胶囊自检完成:波形 2s → 转换圈 1.2s → 隐藏(全程日志见上方)")
 	case "app":
 		runApp()
 	default:
@@ -76,6 +72,7 @@ func usage() {
   voice-input check          检查配置与模型文件是否就绪
   voice-input file <a.wav>   转写一个 WAV 文件(整句引擎)
   voice-input streamtest <a.wav>  流式引擎离线验证(打印 partial 演进与定稿)
+  voice-input capsuletest         声音胶囊自检(波形→转换圈→隐藏)
   voice-input listen         常驻监听:说话→自动断句→文字打进焦点输入框
 `)
 }
@@ -278,10 +275,10 @@ func runListen() {
 }
 
 // transcribeAndType 转写一段语音并注入焦点输入框,打印状态行。
-// 识别期间在光标旁显示 loading 悬浮层(告知"AI 在转,不是卡死")。
+// 识别期间胶囊保持 loading 态(告知"AI 在转,不是卡死")。
 func transcribeAndType(engine asr.Engine, seg []float32) {
-	done := overlay.Busy()
-	defer done()
+	conv := capsule.BeginConvert()
+	defer conv()
 
 	dur := time.Duration(len(seg)) * time.Second / sampleRate
 	start := time.Now()

@@ -25,12 +25,12 @@ import (
 	"fyne.io/systray"
 
 	"voice_input/internal/asr"
+	"voice_input/internal/capsule"
 	"voice_input/internal/capture"
 	"voice_input/internal/config"
 	"voice_input/internal/hotkey"
 	"voice_input/internal/inject"
 	"voice_input/internal/keystore"
-	"voice_input/internal/overlay"
 	"voice_input/internal/setup"
 	"voice_input/internal/vad"
 )
@@ -866,6 +866,7 @@ func (d *dictation) setListening(on bool) {
 			return
 		}
 		d.listening.Store(true)
+		capsule.Begin() // 胶囊出现,显示波形
 		appLog.Printf("🎤 听写已开启")
 	} else {
 		d.listening.Store(false)
@@ -877,6 +878,7 @@ func (d *dictation) setListening(on bool) {
 				appLog.Printf("⚠️ 暂停麦克风失败: %v", err)
 			}
 		}
+		capsule.End() // 波形收场:有在途转换则切 loading,否则延迟隐藏
 
 		if d.streamingMode.Load() {
 			// 流式:立即换新会话位,旧会话后台收尾(等云端吐完最后结果)
@@ -904,13 +906,13 @@ func (d *dictation) setListening(on bool) {
 
 // drainSession 后台收尾一个流式会话:轮询 partial/endpoint,把剩余文字补打进
 // 输入框后关闭会话。startTyped 为松手前已打进的部分,只补增量。
-// 全程在光标旁显示 loading(松手后仍在转换的可视反馈)。
+// 期间胶囊保持 loading 态(松手后仍在转换的可视反馈)。
 func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 	if sess == nil {
 		return
 	}
-	busy := overlay.Busy()
-	defer busy()
+	conv := capsule.BeginConvert()
+	defer conv()
 	defer func() {
 		_ = sess.Close()
 		appLog.Printf("🎙 会话收尾完成")
@@ -960,17 +962,25 @@ func (d *dictation) refreshMenu() {
 	}
 }
 
-// audioLoop 消费音频,切段转写并注入;每 2s 记录一次输入电平(诊断采音问题)。
+// audioLoop 消费音频,切段转写并注入;音量实时喂给声音胶囊的波形,
+// 每 2s 记录一次输入电平(诊断采音问题)。
 func (d *dictation) audioLoop() {
 	var sumSq float64
 	var count int
 	lastReport := time.Now()
 
 	for pcm := range d.audioCh {
+		var sq float64
 		for _, s := range pcm {
-			sumSq += float64(s) * float64(s)
+			v := float64(s)
+			sq += v * v
+			sumSq += v * v
 		}
 		count += len(pcm)
+		if len(pcm) > 0 {
+			// 本帧 RMS → 归一化音量(语音典型 0.02~0.15,增益 9 拉满)
+			capsule.Level(math.Sqrt(sq/float64(len(pcm))) * 9)
+		}
 
 		if time.Since(lastReport) >= 2*time.Second {
 			if count > 0 {
