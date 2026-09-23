@@ -76,7 +76,7 @@ def draw_bars(draw, bars, scale, ox, oy, fill):
 
 
 def make_app_icon() -> Image.Image:
-    """应用图标:1024 圆角黑方块 + 居中白波形(波形宽约 72%)。"""
+    """应用图标:1024 圆角黑方块 + 居中白波形(波形宽约 94%,粗壮醒目)。"""
     src = Image.open(ASSETS / "icon-source-app.png")
     bars = parse_bars(src)
     size = 1024
@@ -85,7 +85,7 @@ def make_app_icon() -> Image.Image:
     # macOS 圆角 ≈ 边长 22.5%(超采样坐标系)
     d.rounded_rectangle([0, 0, size * SS - 1, size * SS - 1],
                         radius=int(size * SS * 0.225), fill=(10, 10, 10, 255))
-    glyph_w = 0.72 * size * SS
+    glyph_w = 0.94 * size * SS
     scale = glyph_w / src.width
     gw = src.width * scale
     gh = src.height * scale
@@ -94,17 +94,28 @@ def make_app_icon() -> Image.Image:
     return canvas.resize((size, size), Image.LANCZOS)
 
 
-def make_menu_template() -> Image.Image:
-    """菜单栏模板图标:纯黑 + 透明底(高分辨率,NSImage 模板渲染自动适配深浅色)。"""
+def make_menu_template(thick: int = 2) -> Image.Image:
+    """菜单栏模板图标:纯黑 + 透明底。先把画布裁到波形内容的紧致边界,
+    再放大到目标高度——消除源图自带的留白,与其他菜单栏图标同等视觉重量。"""
     src = Image.open(ASSETS / "icon-source-menu.png")
     bars = parse_bars(src)
-    target_h = 176  # 约 4x 点尺寸,余量充足
-    scale = target_h * SS / src.height
-    w = int(src.width * scale) + 8 * SS
+    if thick > 1:
+        bars = [(x0, x1, top - (thick - 1) // 2, bot + thick // 2)
+                for x0, x1, top, bot in bars]
+    # 内容紧致边界(加粗后的)
+    left = min(b[0] for b in bars)
+    right = max(b[1] for b in bars)
+    top = min(b[2] for b in bars)
+    bot = max(b[3] for b in bars)
+
+    target_h = 176  # 点尺寸高 22pt @8x;模板渲染时按 13pt 显示,留触达余量
+    scale = target_h * SS / (bot - top + 1)
+    w = int((right - left + 1) * scale) + 8 * SS
     h = target_h * SS + 8 * SS
     canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(canvas)
-    draw_bars(d, bars, scale, 4 * SS, 4 * SS, (0, 0, 0, 255))
+    draw_bars(d, bars, scale, 4 * SS - left * scale, (h - (bot - top + 1) * scale) / 2,
+              (0, 0, 0, 255))
     return canvas.resize((w // SS, h // SS), Image.LANCZOS)
 
 
