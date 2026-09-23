@@ -1,0 +1,60 @@
+# 内部工程文档(本地保留,不入库)
+AGENTS.md
+ARCHITECTURE.md
+Memory/
+specCoding/
+docs/
+
+# 二进制与构建产物(锚定根目录:裸二进制名为 voice-input,
+# 不带斜杠会误伤 cmd/voice-input/ 源码目录——曾导致入口代码从未入库)
+/voice-input
+*.o
+*.a
+VoiceInput.app/
+VoiceInput-dist/
+VoiceInput-dist.zip
+
+# 本地配置(含密钥)
+.env
+*.local.json
+
+# 模型缓存
+models/
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+build/
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+__pycache__/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

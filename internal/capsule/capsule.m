@@ -5,9 +5,9 @@
 #include "capsule.h"
 #include <pthread.h>
 
-static const CGFloat kCapsuleW = 280, kCapsuleH = 64;
-static const int kBars = 24;
-static const CGFloat kPad = 14, kBarW = 6, kBarGap = 4.2;
+static const CGFloat kCapsuleW = 200, kCapsuleH = 44;
+static const int kBars = 16;
+static const CGFloat kBarW = 6, kBarGap = 5;
 
 // 波形环形缓冲:barHead 指向"下一帧写入位",读出时旧→新 从左到右
 static pthread_mutex_t lvlMu = PTHREAD_MUTEX_INITIALIZER;
@@ -34,10 +34,11 @@ static BOOL converting = NO;
 	for (int i = 0; i < kBars; i++) lv[i] = barLevels[(barHead + i) % kBars];
 	pthread_mutex_unlock(&lvlMu);
 
-	CGFloat x = kPad, midY = b.size.height / 2;
-	CGFloat maxH = b.size.height - 16;
+	CGFloat totalW = kBars * kBarW + (kBars - 1) * kBarGap;
+	CGFloat x = (b.size.width - totalW) / 2, midY = b.size.height / 2;
+	CGFloat maxH = b.size.height - 14;
 	for (int i = 0; i < kBars; i++, x += kBarW + kBarGap) {
-		CGFloat h = 5 + lv[i] * maxH;
+		CGFloat h = 4 + lv[i] * maxH;
 		if (h > maxH) h = maxH;
 		NSRect r = NSMakeRect(x, midY - h / 2, kBarW, h);
 		[[NSColor colorWithCalibratedWhite:1.0 alpha:0.92] setFill];
@@ -63,7 +64,7 @@ static void onMain(void (^block)(void)) {
 static void layoutPanel(void) {
 	NSScreen *scr = [NSScreen mainScreen];
 	if (!scr) return;
-	CGFloat y = scr.visibleFrame.origin.y + 14; // Dock(或屏底)上方一点
+	CGFloat y = scr.visibleFrame.origin.y + 12; // Dock(或屏底)上方一点
 	CGFloat x = scr.frame.origin.x + (scr.frame.size.width - kCapsuleW) / 2;
 	[capsulePanel setFrameOrigin:NSMakePoint(x, y)];
 }
@@ -89,7 +90,7 @@ static void ensurePanel(void) {
 	capsulePanel.contentView = waveView;
 
 	spinIndicator = [[NSProgressIndicator alloc]
-		initWithFrame:NSMakeRect(kCapsuleW / 2 - 14, kCapsuleH / 2 - 14, 28, 28)];
+		initWithFrame:NSMakeRect(kCapsuleW / 2 - 11, kCapsuleH / 2 - 11, 22, 22)];
 	[spinIndicator setStyle:NSProgressIndicatorStyleSpinning];
 	[spinIndicator setControlSize:NSControlSizeSmall];
 	[spinIndicator setDisplayedWhenStopped:YES];
