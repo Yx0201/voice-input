@@ -5,9 +5,9 @@
 #include "capsule.h"
 #include <pthread.h>
 
-static const CGFloat kCapsuleW = 200, kCapsuleH = 44;
-static const int kBars = 16;
-static const CGFloat kBarW = 6, kBarGap = 5;
+static const CGFloat kCapsuleW = 140, kCapsuleH = 44;
+static const int kBars = 14;
+static const CGFloat kBarW = 4, kBarGap = 4;
 
 // 波形环形缓冲:barHead 指向"下一帧写入位",读出时旧→新 从左到右
 static pthread_mutex_t lvlMu = PTHREAD_MUTEX_INITIALIZER;
