@@ -406,29 +406,29 @@ func (d *dictation) onReady() {
 	systray.SetTemplateIcon(menuIcon, menuIcon)
 	systray.SetTooltip("voice-input 语音听写")
 
-	d.mStatus = systray.AddMenuItem("启动中……", "当前状态")
+	d.mStatus = systray.AddMenuItem("启动中……", "")
 	d.mStatus.Disable()
-	d.mToggle = systray.AddMenuItem("暂停听写", "点击或按热键切换")
-	d.mDownload = systray.AddMenuItem("⬇️ 下载缺失模型(约 230MB)", "缺失时显示;下载完成自动开始听写")
+	d.mToggle = systray.AddMenuItem("暂停听写", "")
+	d.mDownload = systray.AddMenuItem("⬇️ 下载缺失模型(约 230MB)", "")
 
 	// 引擎切换子菜单(本地/云端二选一)
-	mEng := systray.AddMenuItem("切换引擎", "本地离线 / 云端高质量")
-	d.mEngLocal = mEng.AddSubMenuItemCheckbox("本地(SenseVoice·离线)", "无需网络,音频不出本机", d.cfg.Engine != "cloud")
-	d.mEngCloud = mEng.AddSubMenuItemCheckbox("云端(百炼·高质量)", "首次切换弹窗输入 API Key,存入钥匙串", d.cfg.Engine == "cloud")
+	mEng := systray.AddMenuItem("切换引擎", "")
+	d.mEngLocal = mEng.AddSubMenuItemCheckbox("本地(SenseVoice·离线)", "", d.cfg.Engine != "cloud")
+	d.mEngCloud = mEng.AddSubMenuItemCheckbox("云端(百炼·高质量)", "", d.cfg.Engine == "cloud")
 
 	// 听写模式子菜单(即时出字/完整句)
-	mMode := systray.AddMenuItem("听写模式", "即时出字(流式) / 完整句(更准)")
-	d.mModeStream = mMode.AddSubMenuItemCheckbox("即时出字(流式)", "边说边出字,落后语音约半秒", d.streamingMode.Load())
-	d.mModeSentence = mMode.AddSubMenuItemCheckbox("完整句(更准)", "说完一句再出字,识别更稳", !d.streamingMode.Load())
+	mMode := systray.AddMenuItem("听写模式", "")
+	d.mModeStream = mMode.AddSubMenuItemCheckbox("即时出字(流式)", "", d.streamingMode.Load())
+	d.mModeSentence = mMode.AddSubMenuItemCheckbox("完整句(更准)", "", !d.streamingMode.Load())
 
 	// 触发方式子菜单(组合键切换/按住说话)
 	ptt := d.hotkeyMode.Load() == "ptt"
-	mTrig := systray.AddMenuItem("触发方式", "组合键切换 / 按住说话")
-	d.mTrigToggle = mTrig.AddSubMenuItemCheckbox("组合键切换(Ctrl+Option+V)", "按一下开,再按一下关", !ptt)
-	d.mTrigPtt = mTrig.AddSubMenuItemCheckbox("按住说话(Option+空格)", "按住收音,松开结束;按键不会向输入框打出空格", ptt)
+	mTrig := systray.AddMenuItem("触发方式", "")
+	d.mTrigToggle = mTrig.AddSubMenuItemCheckbox("组合键切换(Ctrl+Option+V)", "", !ptt)
+	d.mTrigPtt = mTrig.AddSubMenuItemCheckbox("按住说话(Option+空格)", "", ptt)
 
-	mAX := systray.AddMenuItem("请求辅助功能授权…", "热键与文字注入需要;弹窗被顶掉时可点这里重新唤起")
-	mHelp := systray.AddMenuItem("❓ 使用帮助", "配置指引:本地模型下载 / 云端 Key 申请")
+	mAX := systray.AddMenuItem("请求辅助功能授权…", "")
+	mHelp := systray.AddMenuItem("❓ 使用帮助", "")
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("退出", "")
 
@@ -483,13 +483,13 @@ func (d *dictation) onReady() {
 			d.mDownload.Hide()
 		}
 		if d.hotkeyMode.Load() == "ptt" {
-			d.mStatus.SetTitle("🎙 按住 Option+空格 说话")
+			d.mStatus.Hide() // ptt 待机态:无状态可示,整行隐藏
 			d.mToggle.SetTitle("开启听写(手动)")
 		} else {
 			go d.enableListening()
 		}
 	} else {
-		d.mStatus.SetTitle("⚠️ 未配置引擎——见「❓ 使用帮助」")
+		d.setStatus("⚠️ 未配置引擎——见「❓ 使用帮助」")
 		d.mToggle.SetTitle("开启听写(需先配置)")
 	}
 }
@@ -502,25 +502,25 @@ func (d *dictation) downloadAndInit() {
 	defer d.downloading.Store(false)
 
 	appLog.Printf("⬇️ 开始下载缺失模型(hf-mirror 优先)")
-	d.mStatus.SetTitle("⬇️ 下载模型中……")
+	d.setStatus("⬇️ 下载模型中……")
 
 	err := setup.EnsureModels(d.cfg, func(file string, done, total int64) {
 		if total > 0 {
 			pct := done * 100 / total
-			d.mStatus.SetTitle(fmt.Sprintf("⬇️ %s %d%%", file, pct))
+			d.setStatus(fmt.Sprintf("⬇️ %s %d%%", file, pct))
 		} else {
-			d.mStatus.SetTitle(fmt.Sprintf("⬇️ %s %.1fMB", file, float64(done)/1e6))
+			d.setStatus(fmt.Sprintf("⬇️ %s %.1fMB", file, float64(done)/1e6))
 		}
 	})
 	if err != nil {
 		appLog.Printf("❌ 模型下载失败: %v", err)
-		d.mStatus.SetTitle("❌ 下载失败——检查网络后重试(日志见 ~/.voice_input/app.log)")
+		d.setStatus("❌ 下载失败——检查网络后重试(日志见 ~/.voice_input/app.log)")
 		return
 	}
 
 	if err := d.initEngine(); err != nil {
 		appLog.Printf("❌ 模型下载完成但引擎加载失败: %v", err)
-		d.mStatus.SetTitle("❌ 引擎加载失败(日志见 ~/.voice_input/app.log)")
+		d.setStatus("❌ 引擎加载失败(日志见 ~/.voice_input/app.log)")
 		return
 	}
 	d.mDownload.Hide()
@@ -568,7 +568,7 @@ func (d *dictation) switchEngine(which string) {
 		eng, err := asr.NewCloudEngine(d.cfg)
 		if err != nil {
 			appLog.Printf("❌ 云端引擎不可用: %v", err)
-			d.mStatus.SetTitle("❌ 云端引擎:" + err.Error())
+			d.setStatus("❌ 云端引擎:" + err.Error())
 			d.syncEngineMenu(engineName(d))
 			return
 		}
@@ -576,7 +576,7 @@ func (d *dictation) switchEngine(which string) {
 		if d.detector == nil {
 			if err := d.ensureVAD(); err != nil {
 				appLog.Printf("❌ VAD 模型下载失败: %v", err)
-				d.mStatus.SetTitle("❌ 断句模型下载失败,检查网络后重试")
+				d.setStatus("❌ 断句模型下载失败,检查网络后重试")
 				return
 			}
 		}
@@ -588,7 +588,7 @@ func (d *dictation) switchEngine(which string) {
 		eng, err := asr.NewLocalEngine(d.cfg)
 		if err != nil {
 			appLog.Printf("❌ 本地引擎不可用: %v", err)
-			d.mStatus.SetTitle("❌ 本地模型未安装——见「❓ 使用帮助」")
+			d.setStatus("❌ 本地模型未安装——见「❓ 使用帮助」")
 			d.showLocalGuide()
 			if d.currentEngine() == nil {
 				d.syncEngineMenu("cloud")
@@ -844,7 +844,7 @@ func (d *dictation) setHotkeyMode(mode string) {
 	d.syncTrigMenu()
 	_ = config.PatchConfig(map[string]any{"hotkey_mode": mode})
 	if mode == "ptt" {
-		d.mStatus.SetTitle("🎙 按住 Option+空格 说话")
+		d.mStatus.Hide() // ptt 待机态:无状态可示,整行隐藏
 		appLog.Printf("⌨️  触发方式 → 按住说话(%s+%s)", fmtModifiers(d.cfg.PttModifiers), d.cfg.PttKey)
 	} else {
 		appLog.Printf("⌨️  触发方式 → 组合键切换(%s+%s)", fmtModifiers(d.cfg.HotkeyModifiers), d.cfg.HotkeyKey)
@@ -890,7 +890,7 @@ func (d *dictation) setListening(on bool) {
 				if err := d.initStreaming(); err != nil {
 					d.streamMu.Unlock()
 					appLog.Printf("❌ 流式引擎不可用: %v", err)
-					d.mStatus.SetTitle("❌ 流式引擎:" + err.Error())
+					d.setStatus("❌ 流式引擎:" + err.Error())
 					return
 				}
 			}
@@ -899,7 +899,7 @@ func (d *dictation) setListening(on bool) {
 				if err != nil {
 					d.streamMu.Unlock()
 					appLog.Printf("❌ 创建流式会话失败: %v", err)
-					d.mStatus.SetTitle("❌ 流式会话:" + err.Error())
+					d.setStatus("❌ 流式会话:" + err.Error())
 					return
 				}
 				d.streamSession = sess
@@ -907,14 +907,14 @@ func (d *dictation) setListening(on bool) {
 			}
 			d.streamMu.Unlock()
 		} else if d.currentEngine() == nil || d.detector == nil {
-			d.mStatus.SetTitle("⚠️ 引擎未就绪——本地模型或云端 Key 需其一(见「❓ 使用帮助」)")
+			d.setStatus("⚠️ 引擎未就绪——本地模型或云端 Key 需其一(见「❓ 使用帮助」)")
 			appLog.Printf("⚠️ 无法开启听写:请下载本地模型(菜单)或切换云端输入 API Key")
 			return
 		}
 		if !d.micReady.Load() {
 			if err := d.startMic(); err != nil {
 				appLog.Printf("❌ 打开麦克风失败: %v", err)
-				d.mStatus.SetTitle("❌ 麦克风不可用:请检查 系统设置→隐私与安全性→麦克风")
+				d.setStatus("❌ 麦克风不可用:请检查 系统设置→隐私与安全性→麦克风")
 				return
 			}
 			appLog.Printf("🎤 麦克风已打开")
@@ -1024,6 +1024,13 @@ func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 	appLog.Printf("⚠️ 会话收尾超时(8s),丢弃未返回的尾部")
 }
 
+// setStatus 显示状态行并更新文案(ptt 待机态整行隐藏,任何真实状态
+// 都要先 Show 回来再改标题)。
+func (d *dictation) setStatus(title string) {
+	d.mStatus.Show()
+	d.mStatus.SetTitle(title)
+}
+
 // refreshMenu 更新菜单栏文案。
 func (d *dictation) refreshMenu() {
 	if d.mStatus == nil {
@@ -1033,10 +1040,10 @@ func (d *dictation) refreshMenu() {
 		return // 错误/下载状态由对应分支维护
 	}
 	if d.listening.Load() {
-		d.mStatus.SetTitle("听写:开启中")
+		d.setStatus("听写:开启中")
 		d.mToggle.SetTitle("暂停听写")
 	} else {
-		d.mStatus.SetTitle("听写:已暂停")
+		d.setStatus("听写:已暂停")
 		d.mToggle.SetTitle("开启听写")
 	}
 }
