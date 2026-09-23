@@ -244,6 +244,7 @@ func runListen() {
 
 	// 音频线程 → 主循环(满则丢弃,防止 VAD/ASR 阻塞采音)
 	audioCh := make(chan []float32, 128)
+	go typeLoop() // transcribeAndType 的打字队列消费者
 
 	mic, err := capture.NewMic(sampleRate, 1, config.Load().InputDevice, func(pcm []float32) {
 		select {
@@ -275,7 +276,7 @@ func runListen() {
 }
 
 // transcribeAndType 转写一段语音并注入焦点输入框,打印状态行。
-// 识别期间胶囊保持 loading 态(告知"AI 在转,不是卡死")。
+// 打字走全局 typeCh 队列(保序、不阻塞调用方);识别期间胶囊持有 loading 态。
 func transcribeAndType(engine asr.Engine, seg []float32) {
 	conv := capsule.BeginConvert()
 	defer conv()
@@ -294,6 +295,6 @@ func transcribeAndType(engine asr.Engine, seg []float32) {
 			log.Printf("⚠️ 文字未注入:辅助功能权限未生效(系统设置→隐私与安全性→辅助功能→删除 VoiceInput 条目后重新授权)")
 			return
 		}
-		inject.TypeText(text)
+		typeTextAsync(text)
 	}
 }

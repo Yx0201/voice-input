@@ -17,8 +17,9 @@ import (
 	"time"
 )
 
-// hideDelay 全部转换完成后的短暂停留,防止连续转换间胶囊闪烁消失。
-const hideDelay = 250 * time.Millisecond
+// hideDelay 松手后(无在途转换时)或全部转换完成后的短暂停留,
+// 吸收转换任务的调度间隙,防止胶囊闪烁消失。
+const hideDelay = 500 * time.Millisecond
 
 var (
 	mu        sync.Mutex
@@ -32,6 +33,7 @@ var (
 func Begin() {
 	mu.Lock()
 	recording = true
+	lastLvl = 0
 	if hideT != nil {
 		hideT.Stop()
 		hideT = nil

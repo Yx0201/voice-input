@@ -38,6 +38,62 @@ import (
 // appLog 双击运行时 stdout 不可见,所有输出同步落到日志文件。
 var appLog *log.Logger
 
+// ---- 全局串行化执行线(时序问题的根治)----
+// 文字注入与整句转写都必须离开采音/音频处理执行线,否则任何一环慢
+// (云端 1-3s 转写、网络回压、大段打字)都会冻结波形甚至丢音频。
+// 注入与分段各用一条单消费者队列:顺序有保证,生产者永不阻塞在慢操作上。
+
+// typeCh 打字队列:所有 inject.TypeText 唯一入口,FIFO 保证文字顺序。
+var typeCh = make(chan string, 256)
+
+// typeLoop 单消费者打字执行线。
+func typeLoop() {
+	for s := range typeCh {
+		if inject.IsAccessibilityGranted() {
+			inject.TypeText(s)
+		}
+	}
+}
+
+// typeTextAsync 把一段文字排队打进焦点输入框(队列满时丢弃并记日志,理论上不会发生)。
+func typeTextAsync(s string) {
+	select {
+	case typeCh <- s:
+	default:
+		log.Printf("⚠️ 注入队列满,丢弃:%q", s)
+	}
+}
+
+// segJob 一段待转写的音频(携带引擎快照,菜单热切换不影响在途任务)。
+type segJob struct {
+	eng asr.Engine
+	seg []float32
+}
+
+// segCh 整句模式分段队列:转写(含云端数秒延迟)不阻塞音频线,分段保序。
+var segCh = make(chan segJob, 64)
+
+// segLoop 单消费者转写执行线。
+func segLoop() {
+	for j := range segCh {
+		transcribeAndType(j.eng, j.seg)
+	}
+}
+
+// feedLevel 在采音线程就地计算一帧的 RMS 并喂给声音胶囊。
+// 与识别/注入完全解耦:识别卡多久,波形都照常起伏。
+func feedLevel(pcm []float32) {
+	if len(pcm) == 0 {
+		return
+	}
+	var sq float64
+	for _, s := range pcm {
+		v := float64(s)
+		sq += v * v
+	}
+	capsule.Level(math.Sqrt(sq/float64(len(pcm))) * 9) // 语音典型 0.02~0.15,增益 9 拉满
+}
+
 func setupAppLog() {
 	dir := config.DefaultDir()
 	_ = os.MkdirAll(dir, 0o755)
@@ -54,17 +110,17 @@ func setupAppLog() {
 
 // dictation 持有听写应用的全部运行态。
 type dictation struct {
-	cfg      config.Config
-	engine   asr.Engine // 整句引擎;engineMu 保护(菜单可热切换)
-	engineMu sync.RWMutex
-	detector *vad.Detector
-	mic      *capture.Mic
-	audioCh  chan []float32
-	listening atomic.Bool
-	micReady  atomic.Bool
+	cfg         config.Config
+	engine      asr.Engine // 整句引擎;engineMu 保护(菜单可热切换)
+	engineMu    sync.RWMutex
+	detector    *vad.Detector
+	mic         *capture.Mic
+	audioCh     chan []float32
+	listening   atomic.Bool
+	micReady    atomic.Bool
 	axRequested atomic.Bool
 	engineReady atomic.Bool
-	downloading  atomic.Bool
+	downloading atomic.Bool
 
 	// 流式听写(即时出字)
 	streamingMode atomic.Bool
@@ -74,15 +130,15 @@ type dictation struct {
 	committed     string     // 已打进输入框的稳定前缀
 	lastPartial   string     // 上一次 partial(两次一致视为稳定)
 
-	mStatus   *systray.MenuItem
-	mToggle   *systray.MenuItem
-	mDownload *systray.MenuItem
-	mEngLocal *systray.MenuItem
-	mEngCloud *systray.MenuItem
+	mStatus       *systray.MenuItem
+	mToggle       *systray.MenuItem
+	mDownload     *systray.MenuItem
+	mEngLocal     *systray.MenuItem
+	mEngCloud     *systray.MenuItem
 	mModeStream   *systray.MenuItem
 	mModeSentence *systray.MenuItem
-	mTrigToggle *systray.MenuItem
-	mTrigPtt    *systray.MenuItem
+	mTrigToggle   *systray.MenuItem
+	mTrigPtt      *systray.MenuItem
 
 	// 触发方式:toggle(组合键切换)/ ptt(按住说话)
 	hotkeyMode    atomic.Value // string
@@ -139,6 +195,8 @@ func runApp() {
 	}
 
 	go d.audioLoop()
+	go typeLoop()
+	go segLoop()
 	systray.Run(d.onReady, func() {})
 	appLog.Printf("== voice-input 退出 ==")
 }
@@ -264,7 +322,7 @@ func (d *dictation) commitStable(partial string) {
 	if len(stable) > len(d.committed) && strings.HasPrefix(stable, d.committed) {
 		delta := stable[len(d.committed):]
 		if delta != "" && inject.IsAccessibilityGranted() {
-			inject.TypeText(delta)
+			typeTextAsync(delta) // 队列化:打字不阻塞音频线,顺序有保证
 			d.committed = stable
 		}
 	}
@@ -278,11 +336,11 @@ func (d *dictation) commitExact(final string) {
 	}
 	if strings.HasPrefix(final, d.committed) {
 		if delta := final[len(d.committed):]; delta != "" && inject.IsAccessibilityGranted() {
-			inject.TypeText(delta)
+			typeTextAsync(delta)
 		}
 	} else if d.committed == "" {
 		if inject.IsAccessibilityGranted() {
-			inject.TypeText(final)
+			typeTextAsync(final)
 		}
 	} else {
 		appLog.Printf("⚠️ 定稿与已提交不一致(保留已提交):已=%q 定=%q", d.committed, final)
@@ -704,6 +762,7 @@ func (d *dictation) startMic() error {
 		if !d.listening.Load() {
 			return
 		}
+		feedLevel(pcm) // 波形电平:采音线程就地投递,与识别/注入互不阻塞
 		select {
 		case d.audioCh <- pcm:
 		default: // 识别阻塞时丢帧,保采音
@@ -878,8 +937,10 @@ func (d *dictation) setListening(on bool) {
 				appLog.Printf("⚠️ 暂停麦克风失败: %v", err)
 			}
 		}
-		capsule.End() // 波形收场:有在途转换则切 loading,否则延迟隐藏
 
+		// 时序约定:先占住在途计数(BeginConvert)再 End——
+		// End 的 evaluate 看到 converts>0 必然亮 loading 圈,
+		// 消除"先关麦、转换任务稍后才起"导致的胶囊直接消失/波形卡死竞态。
 		if d.streamingMode.Load() {
 			// 流式:立即换新会话位,旧会话后台收尾(等云端吐完最后结果)
 			d.streamMu.Lock()
@@ -889,16 +950,25 @@ func (d *dictation) setListening(on bool) {
 			d.committed, d.lastPartial = "", ""
 			d.streamMu.Unlock()
 			if sess != nil {
-				go d.drainSession(sess, startTyped)
+				conv := capsule.BeginConvert()
+				go func() {
+					defer conv()
+					d.drainSession(sess, startTyped)
+				}()
 			}
 		} else if d.detector != nil {
-			// 整句:补静音强制收割尾段,转写异步进行
+			// 整句:补静音强制收割尾段;尾段与实时段走同一条转写队列,保序
 			if eng := d.currentEngine(); eng != nil {
-				for _, seg := range d.detector.Flush() {
-					go transcribeAndType(eng, seg)
-				}
+				conv := capsule.BeginConvert()
+				go func() {
+					defer conv()
+					for _, seg := range d.detector.Flush() {
+						segCh <- segJob{eng, seg}
+					}
+				}()
 			}
 		}
+		capsule.End() // 无在途计数时才走延迟隐藏(500ms)
 		appLog.Printf("⏸  听写已暂停(在途识别继续)")
 	}
 	d.refreshMenu()
@@ -906,13 +976,12 @@ func (d *dictation) setListening(on bool) {
 
 // drainSession 后台收尾一个流式会话:轮询 partial/endpoint,把剩余文字补打进
 // 输入框后关闭会话。startTyped 为松手前已打进的部分,只补增量。
-// 期间胶囊保持 loading 态(松手后仍在转换的可视反馈)。
+// 在途计数由调用方(setListening 的松开分支)持有,保证"松手→亮圈"时序确定。
+// 打字走 typeCh 全局队列,与实时提交保持顺序。
 func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 	if sess == nil {
 		return
 	}
-	conv := capsule.BeginConvert()
-	defer conv()
 	defer func() {
 		_ = sess.Close()
 		appLog.Printf("🎙 会话收尾完成")
@@ -926,10 +995,10 @@ func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 			if final != "" && granted {
 				if strings.HasPrefix(final, typed) {
 					if delta := final[len(typed):]; delta != "" {
-						inject.TypeText(delta)
+						typeTextAsync(delta)
 					}
 				} else if typed == "" {
-					inject.TypeText(final)
+					typeTextAsync(final)
 				} else {
 					appLog.Printf("⚠️ 定稿与已提交不一致(保留已提交):已=%q 定=%q", typed, final)
 				}
@@ -937,7 +1006,7 @@ func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 			return
 		}
 		if p := sess.Partial(); granted && strings.HasPrefix(p, typed) && len(p) > len(typed) {
-			inject.TypeText(p[len(typed):])
+			typeTextAsync(p[len(typed):])
 			typed = p
 		}
 		time.Sleep(150 * time.Millisecond)
@@ -962,25 +1031,19 @@ func (d *dictation) refreshMenu() {
 	}
 }
 
-// audioLoop 消费音频,切段转写并注入;音量实时喂给声音胶囊的波形,
-// 每 2s 记录一次输入电平(诊断采音问题)。
+// audioLoop 消费音频并按模式分发:流式直喂会话;整句送 VAD,分段排队转写。
+// 波形电平已在采音回调(feedLevel)就地投递,本循环只服务识别;每 2s 的
+// 输入电平日志用于诊断采音问题。
 func (d *dictation) audioLoop() {
 	var sumSq float64
 	var count int
 	lastReport := time.Now()
 
 	for pcm := range d.audioCh {
-		var sq float64
 		for _, s := range pcm {
-			v := float64(s)
-			sq += v * v
-			sumSq += v * v
+			sumSq += float64(s) * float64(s)
 		}
 		count += len(pcm)
-		if len(pcm) > 0 {
-			// 本帧 RMS → 归一化音量(语音典型 0.02~0.15,增益 9 拉满)
-			capsule.Level(math.Sqrt(sq/float64(len(pcm))) * 9)
-		}
 
 		if time.Since(lastReport) >= 2*time.Second {
 			if count > 0 {
@@ -1001,7 +1064,7 @@ func (d *dictation) audioLoop() {
 			continue
 		}
 		for _, seg := range d.detector.Feed(pcm) {
-			transcribeAndType(eng, seg)
+			segCh <- segJob{eng, seg} // 转写(云端可达数秒)不阻塞音频线
 		}
 	}
 }
