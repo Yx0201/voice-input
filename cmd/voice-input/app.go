@@ -291,8 +291,15 @@ func (d *dictation) polishFlush(force bool) {
 // polishReset 清空缓冲(开新听写轮时;内容属上一轮,不冲刷)。
 func (d *dictation) polishReset() {
 	d.polishMu.Lock()
+	raw := d.polishBuf
 	d.polishBuf = ""
 	d.polishMu.Unlock()
+	// 快速连按场景:松手后 drainSession 还在往缓冲补尾巴,此刻重新按住
+	// 不能把残留丢弃——原文直出(不润色陈旧内容),一个字都不许少。
+	if raw != "" {
+		appLog.Printf("↩️ 上轮残留缓冲直出:%q", raw)
+		typeTextAsync(raw)
+	}
 }
 
 // runApp 启动菜单栏应用;阻塞直至退出。
@@ -486,7 +493,8 @@ func (d *dictation) commitStable(partial string, reliable bool) {
 	}
 }
 
-// commitExact 端点定稿:只追加不回删;定稿与已提交前缀不一致时保留已提交并记日志。
+// commitExact 端点定稿:只追加不回删;前缀失配(云端回改标点/同音字)时按
+// 锚点补救尾巴,无法对齐才放弃并记日志。
 func (d *dictation) commitExact(final string) {
 	final = strings.TrimSpace(final)
 	if final == "" {
@@ -500,8 +508,13 @@ func (d *dictation) commitExact(final string) {
 		if inject.IsAccessibilityGranted() {
 			d.appendText(final)
 		}
+	} else if tail, ok := salvageTail(d.committed, final); ok {
+		if tail != "" && inject.IsAccessibilityGranted() {
+			appLog.Printf("🔧 定稿尾部补救(云端回改致前缀失配):+%q", tail)
+			d.appendText(tail)
+		}
 	} else {
-		appLog.Printf("⚠️ 定稿与已提交不一致(保留已提交):已=%q 定=%q", d.committed, final)
+		appLog.Printf("⚠️ 定稿与已提交不一致(无法对齐,保留已提交):已=%q 定=%q", d.committed, final)
 	}
 }
 
@@ -1207,8 +1220,13 @@ func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 					}
 				} else if typed == "" {
 					d.appendText(final)
+				} else if tail, ok := salvageTail(typed, final); ok {
+					if tail != "" {
+						appLog.Printf("🔧 定稿尾部补救(云端回改致前缀失配):+%q", tail)
+						d.appendText(tail)
+					}
 				} else {
-					appLog.Printf("⚠️ 定稿与已提交不一致(保留已提交):已=%q 定=%q", typed, final)
+					appLog.Printf("⚠️ 定稿与已提交不一致(无法对齐,保留已提交):已=%q 定=%q", typed, final)
 				}
 			}
 			d.polishFlush(false)
@@ -1284,6 +1302,25 @@ func (d *dictation) audioLoop() {
 			segCh <- segJob{d, eng, seg} // 转写(云端可达数秒)不阻塞音频线
 		}
 	}
+}
+
+// salvageTail 定稿尾部补救:云端定稿会回改早前文字(插/删标点、纠同音字),
+// 前缀匹配失败时不再把整条定稿丢弃,而是拿已提交文本末 n 字(6/4/2 逐级退化)
+// 作锚点在定稿中定位最后一次出现,其后即为本应续上的尾巴。
+// 返回 (尾巴, 是否已和解):找不到锚点(定稿被整体重写,无可靠对齐)才放弃。
+func salvageTail(committed, final string) (string, bool) {
+	cr := []rune(committed)
+	fs := final
+	for _, n := range []int{6, 4, 2} {
+		if len(cr) < n {
+			continue
+		}
+		anchor := string(cr[len(cr)-n:])
+		if i := strings.LastIndex(fs, anchor); i >= 0 {
+			return fs[i+len(anchor):], true
+		}
+	}
+	return "", false
 }
 
 // commonPrefix 两个字符串的最长公共前缀(按 rune,避免切在多字节字符中间)。
