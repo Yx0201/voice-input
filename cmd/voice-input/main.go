@@ -63,7 +63,11 @@ func main() {
 		if len(os.Args) >= 3 {
 			text = os.Args[2]
 		}
-		runPolishTest(text)
+		lang := ""
+		if len(os.Args) >= 4 {
+			lang = os.Args[3] // "en" = 翻译模式
+		}
+		runPolishTest(text, lang)
 	case "app":
 		runApp()
 	default:
@@ -89,12 +93,13 @@ func usage() {
 
 // runPolishTest 用云端润色清理一段文本,打印输入/输出/耗时。
 // Key 优先 config,缺省自动补读钥匙串。
-func runPolishTest(text string) {
+func runPolishTest(text, lang string) {
 	cfg := config.Load()
 	pc := polish.Config{
 		Model:          cfg.PolishModel,
 		BailianAPIKey:  cfg.DashScopeAPIKey,
 		BailianBaseURL: bailianBaseURL(cfg),
+		TargetLang:     lang,
 	}
 	if pc.BailianAPIKey == "" {
 		pc.BailianAPIKey = keystore.Load()
@@ -103,8 +108,12 @@ func runPolishTest(text string) {
 		fmt.Println("⚠️ 未配置百炼 API Key(config/钥匙串均无),润色无从谈起")
 		os.Exit(2)
 	}
-	fmt.Printf("云端模型: %s\n输入: %s\n润色中……\n",
-		orDefault(pc.Model, polish.DefaultBailianModel), text)
+	mode := "润色"
+	if pc.Translating() {
+		mode = "翻译→" + pc.TargetLang
+	}
+	fmt.Printf("云端模型: %s(%s)\n输入: %s\n%s中……\n",
+		orDefault(pc.Model, polish.DefaultBailianModel), mode, text, mode)
 	start := time.Now()
 	out, err := polish.Clean(context.Background(), pc, text)
 	elapsed := time.Since(start)

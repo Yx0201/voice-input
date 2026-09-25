@@ -52,6 +52,9 @@ type Config struct {
 	PolishMaxChars int `json:"polish_max_chars"`
 	// PolishTimeoutMs 单次润色请求超时;0 = 3s。
 	PolishTimeoutMs int `json:"polish_timeout_ms"`
+	// OutputLanguage 输出语言:"zh"(默认,润色中文)/ "en"(清理并翻译成英文)。
+	// en 模式下润色管线强制启用(需百炼 Key,无 Key 静默回退中文原文)。
+	OutputLanguage string `json:"output_language"`
 }
 
 // DefaultDir 返回数据根目录 ~/.voice_input。
@@ -89,6 +92,7 @@ func defaultConfig() Config {
 		PolishProvider:  "bailian",
 		PolishMinChars:  20,
 		PolishMaxChars:  120,
+		OutputLanguage:  "zh",
 	}
 }
 
@@ -126,6 +130,9 @@ func Load() Config {
 	}
 	if v := os.Getenv("VOICE_INPUT_POLISH_MODEL"); v != "" {
 		cfg.PolishModel = v
+	}
+	if v := os.Getenv("VOICE_INPUT_OUTPUT_LANGUAGE"); v != "" {
+		cfg.OutputLanguage = v
 	}
 	return cfg
 }

@@ -122,13 +122,20 @@ func polishLoop(cfgFun func() polish.Config) {
 			conv()
 			continue
 		}
-		out, err := polish.Clean(context.Background(), cfgFun(), raw)
-		if err == nil && !polish.SanityOK(raw, out) {
+		cfg := cfgFun()
+		out, err := polish.Clean(context.Background(), cfg, raw)
+		if err == nil && len(out) == 0 {
+			err = fmt.Errorf("输出为空")
+		}
+		if err == nil && !cfg.Translating() && !polish.SanityOK(raw, out) {
 			err = fmt.Errorf("输出异常缩短(%d→%d 字)", utf8.RuneCountInString(raw), utf8.RuneCountInString(out))
 		}
 		if err != nil {
 			appLog.Printf("✨润色不可用,已回退原文(%v)", err)
 			typeTextAsync(raw)
+		} else if cfg.Translating() {
+			appLog.Printf("🌐 翻译:%q → %q", raw, out)
+			typeTextAsync(out)
 		} else {
 			out = ensureEndPunct(out)
 			appLog.Printf("✨ 润色:%q → %q", raw, out)
@@ -214,6 +221,8 @@ type dictation struct {
 	mTrigToggle   *systray.MenuItem
 	mTrigPtt      *systray.MenuItem
 	mPolish       *systray.MenuItem // 文字润色(云端),勾选即生效
+	mLangZh       *systray.MenuItem
+	mLangEn       *systray.MenuItem
 
 	// 触发方式:toggle(组合键切换)/ ptt(按住说话)
 	hotkeyMode    atomic.Value // string
@@ -243,8 +252,16 @@ func (d *dictation) setEngine(e asr.Engine) {
 // polishOn 润色是否实际生效:用户未关 + 百炼 Key 在手(无 Key 静默失效)。
 // 只读内存 cfg,不做钥匙串 IO(热路径;Key 的补读只在启动/切换时做一次)。
 func (d *dictation) polishOn() bool {
+	// 翻译输出(en)强制启用管线——即使润色开关被关,选了英文就得翻译;
+	// 仍然受"有 Key"约束,无 Key 静默回退中文原文
+	if d.cfg.OutputLanguage == "en" {
+		return d.cfg.DashScopeAPIKey != ""
+	}
 	return d.cfg.PolishProvider == "bailian" && d.cfg.DashScopeAPIKey != ""
 }
+
+// translating 当前是否翻译输出模式。
+func (d *dictation) translating() bool { return d.cfg.OutputLanguage == "en" }
 
 // polishCfg 装配润色通道配置。
 func (d *dictation) polishCfg() polish.Config {
@@ -253,6 +270,7 @@ func (d *dictation) polishCfg() polish.Config {
 		BailianAPIKey:  d.cfg.DashScopeAPIKey,
 		BailianBaseURL: bailianBaseURL(d.cfg),
 		Timeout:        time.Duration(d.cfg.PolishTimeoutMs) * time.Millisecond,
+		TargetLang:     d.cfg.OutputLanguage,
 	}
 }
 
@@ -286,6 +304,9 @@ func (d *dictation) appendText(s string) {
 	if min <= 0 {
 		min = 20
 	}
+	if d.translating() {
+		min = 1 // 翻译模式:短句也要翻,不做最小字数跳过
+	}
 	flush := n >= max ||
 		(n >= min && endsWithSentencePunct(d.polishBuf))
 	if !flush {
@@ -317,6 +338,9 @@ func (d *dictation) polishFlush(force bool) {
 	min := d.cfg.PolishMinChars
 	if min <= 0 {
 		min = 20
+	}
+	if d.translating() {
+		min = 0 // 翻译模式:polishLoop 侧 min<=0 即不跳过,短句也翻
 	}
 	select {
 	case polishCh <- polishJob{raw, force, min}:
@@ -662,6 +686,11 @@ func (d *dictation) onReady() {
 	d.mPolish = systray.AddMenuItemCheckbox("文字润色(云端·去口水词)", "",
 		d.polishOn())
 
+	// 输出语言(翻译模式):English = 润色后翻译成英文输出
+	mLang := systray.AddMenuItem("输出语言", "")
+	d.mLangZh = mLang.AddSubMenuItemCheckbox("中文(默认)", "", !d.translating())
+	d.mLangEn = mLang.AddSubMenuItemCheckbox("English(说中文打英文)", "", d.translating())
+
 	mAX := systray.AddMenuItem("请求辅助功能授权…", "")
 	mHelp := systray.AddMenuItem("❓ 使用帮助", "")
 	systray.AddSeparator()
@@ -688,6 +717,10 @@ func (d *dictation) onReady() {
 				go d.setHotkeyMode("ptt")
 			case <-d.mPolish.ClickedCh:
 				go d.togglePolish()
+			case <-d.mLangZh.ClickedCh:
+				go d.setOutputLanguage("zh")
+			case <-d.mLangEn.ClickedCh:
+				go d.setOutputLanguage("en")
 			case <-mHelp.ClickedCh:
 				go d.showHelp()
 			case <-mAX.ClickedCh:
@@ -1102,6 +1135,53 @@ func (d *dictation) syncTrigMenu() {
 	}
 }
 
+// setOutputLanguage 菜单切换输出语言(zh/en);en 需要百炼 Key,
+// 无 Key 静默保持中文(与润色降级哲学一致)。
+func (d *dictation) setOutputLanguage(lang string) {
+	if lang == d.cfg.OutputLanguage {
+		d.syncLangMenu()
+		return
+	}
+	if lang == "en" {
+		if d.cfg.DashScopeAPIKey == "" {
+			if k := keystore.Load(); k != "" {
+				d.cfg.DashScopeAPIKey = k
+			}
+		}
+		if d.cfg.DashScopeAPIKey == "" {
+			appLog.Printf("🌐 翻译输出保持关闭:未配置百炼 API Key")
+			showDialog("voice-input · 翻译输出需要 API Key",
+				[]string{"说中文打英文需要云端翻译(复用百炼 API Key)。",
+					"请先在 菜单→切换引擎→云端 配置 Key,再开启 English 输出。"},
+				[]string{"好"}, "好")
+			d.syncLangMenu()
+			return
+		}
+	}
+	d.cfg.OutputLanguage = lang
+	d.syncLangMenu()
+	_ = config.PatchConfig(map[string]any{"output_language": lang})
+	if lang == "en" {
+		appLog.Printf("🌐 输出语言 → English(说中文,打英文)")
+	} else {
+		appLog.Printf("🌐 输出语言 → 中文(润色)")
+	}
+}
+
+// syncLangMenu 输出语言子菜单勾选与实际一致。
+func (d *dictation) syncLangMenu() {
+	if d.mLangZh == nil {
+		return
+	}
+	if d.translating() {
+		d.mLangEn.Check()
+		d.mLangZh.Uncheck()
+	} else {
+		d.mLangZh.Check()
+		d.mLangEn.Uncheck()
+	}
+}
+
 // togglePolish 菜单勾切换润色。开启条件=百炼 Key 在手;无 Key 静默保持关闭
 // (不弹窗,勾选框维持未勾,日志留痕)。关闭是用户显式选择,持久化。
 func (d *dictation) togglePolish() {
@@ -1221,9 +1301,10 @@ func (d *dictation) setListening(on bool) {
 		}
 		d.listening.Store(true)
 		capsule.Begin() // 胶囊出现,显示波形
-		appLog.Printf("🎤 听写已开启(%s|%s|%s)",
+		appLog.Printf("🎤 听写已开启(%s|%s|%s|%s)",
 			map[bool]string{true: "流式", false: "整句"}[d.streamingMode.Load()],
-			engineLabel(d), map[bool]string{true: "润色开", false: "润色关"}[d.polishOn()])
+			engineLabel(d), map[bool]string{true: "润色开", false: "润色关"}[d.polishOn()],
+			map[bool]string{true: "English", false: "中文"}[d.translating()])
 	} else {
 		d.listening.Store(false)
 
