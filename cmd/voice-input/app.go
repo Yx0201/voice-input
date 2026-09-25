@@ -179,16 +179,33 @@ func segLoop() {
 	}
 }
 
-// polishCh 润色请求队列(开启润色时):原始识别文本进,润色后打字出。
-// 单消费者保证文字顺序;调用方永不阻塞在 LLM 往返上。
-var polishCh = make(chan string, 8)
+// polishJob 一次待输出任务:短句(<minChars 且非 force)在消费者内部直出,
+// 其余送 LLM。统一走单队列是顺序保证的关键——曾经短句绕过队列直接打字,
+// 超车了还在 LLM 里泡着的先到批次,用户看到文字顺序与说话顺序颠倒
+// (2026-09-25 实测事故)。
+type polishJob struct {
+	text     string
+	force    bool // 松手/端点冲刷:短句也照常判定(仍可直出,但保序)
+	minChars int
+}
 
-// polishLoop 单消费者润色执行线:云端清理 → 打字;失败/异常静默回退原文
-// (日志仅留一行排障痕迹,无弹窗无状态栏提示)。在途计入胶囊转换态
+// polishCh 输出任务队列:原始识别文本进,润色(或短句直出)后打字出。
+// 单消费者保证文字顺序;调用方永不阻塞在 LLM 往返上。
+var polishCh = make(chan polishJob, 8)
+
+// polishLoop 单消费者输出执行线:短句直出 / 云端清理 → 打字;
+// 失败/异常静默回退原文(日志仅留一行排障痕迹)。在途计入胶囊转换态
 // (松手后的末次冲刷期间转圈不提前消失)。
 func polishLoop(cfgFun func() polish.Config) {
-	for raw := range polishCh {
+	for job := range polishCh {
+		raw := job.text
 		conv := capsule.BeginConvert()
+		if !job.force && job.minChars > 0 && utf8.RuneCountInString(raw) < job.minChars {
+			appLog.Printf("↩️ 短句跳过润色直出:%q", raw)
+			typeTextAsync(raw)
+			conv()
+			continue
+		}
 		out, err := polish.Clean(context.Background(), cfgFun(), raw)
 		if err == nil && !polish.SanityOK(raw, out) {
 			err = fmt.Errorf("输出异常缩短(%d→%d 字)", utf8.RuneCountInString(raw), utf8.RuneCountInString(out))
@@ -362,7 +379,7 @@ func (d *dictation) appendText(s string) {
 	d.polishBuf = ""
 	d.polishMu.Unlock()
 	select {
-	case polishCh <- raw:
+	case polishCh <- polishJob{raw, false, min}:
 	default: // 队列满(理论上不可能):塞回缓冲,下轮再冲
 		d.polishMu.Lock()
 		d.polishBuf = raw + d.polishBuf
@@ -384,15 +401,10 @@ func (d *dictation) polishFlush(force bool) {
 	if min <= 0 {
 		min = 20
 	}
-	if !force && utf8.RuneCountInString(raw) < min {
-		appLog.Printf("↩️ 短句跳过润色直出:%q", raw)
-		typeTextAsync(raw)
-		return
-	}
 	select {
-	case polishCh <- raw:
+	case polishCh <- polishJob{raw, force, min}:
 	default:
-		typeTextAsync(raw) // 队列满也不丢字
+		typeTextAsync(raw) // 队列满也不丢字(极端情况,保序代价可接受)
 	}
 }
 
@@ -405,8 +417,12 @@ func (d *dictation) polishReset() {
 	// 快速连按场景:松手后 drainSession 还在往缓冲补尾巴,此刻重新按住
 	// 不能把残留丢弃——原文直出(不润色陈旧内容),一个字都不许少。
 	if raw != "" {
-		appLog.Printf("↩️ 上轮残留缓冲直出:%q", raw)
-		typeTextAsync(raw)
+		appLog.Printf("↩️ 上轮残留缓冲入队:%q", raw)
+		select {
+		case polishCh <- polishJob{raw, true, 0}:
+		default:
+			typeTextAsync(raw)
+		}
 	}
 }
 
