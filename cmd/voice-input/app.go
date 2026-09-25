@@ -214,6 +214,7 @@ func polishLoop(cfgFun func() polish.Config) {
 			appLog.Printf("✨润色不可用,已回退原文(%v)", err)
 			typeTextAsync(raw)
 		} else {
+			out = ensureEndPunct(out)
 			appLog.Printf("✨ 润色:%q → %q", raw, out)
 			typeTextAsync(out)
 		}
@@ -560,6 +561,16 @@ func (d *dictation) syncModeMenu() {
 
 // streamPuncts 流式提交与润色冲刷共用的句读标点集。
 var streamPuncts = "。?!;;、,.!?"
+
+// ensureEndPunct 批次输出保住句尾标点:LLM 偶发吃掉末尾句号,两个批次拼起来
+// 句子边界消失,读起来像顺序错乱(2026-09-25 实测"只回退我们+刚才记录的…")。
+// 润色批次以句读边界冲刷,末尾补句号忠实还原语义。
+func ensureEndPunct(out string) string {
+	if out == "" || endsWithSentencePunct(out) {
+		return out
+	}
+	return out + "。"
+}
 
 // endsWithSentencePunct 文本是否以任一句读标点结尾(润色冲刷的边界信号)。
 func endsWithSentencePunct(s string) bool {
