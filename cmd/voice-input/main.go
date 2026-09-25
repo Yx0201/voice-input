@@ -87,43 +87,29 @@ func usage() {
 `)
 }
 
-// runPolishTest 用当前配置的润色通道清理一段文本,打印输入/输出/耗时。
-// 云端 Key 优先 config,缺省自动补读钥匙串。
+// runPolishTest 用云端润色清理一段文本,打印输入/输出/耗时。
+// Key 优先 config,缺省自动补读钥匙串。
 func runPolishTest(text string) {
 	cfg := config.Load()
 	pc := polish.Config{
-		Provider:       polish.Provider(cfg.PolishProvider),
 		Model:          cfg.PolishModel,
-		OllamaURL:      cfg.PolishOllamaURL,
 		BailianAPIKey:  cfg.DashScopeAPIKey,
 		BailianBaseURL: bailianBaseURL(cfg),
 	}
-	if pc.Provider == polish.Bailian && pc.BailianAPIKey == "" {
+	if pc.BailianAPIKey == "" {
 		pc.BailianAPIKey = keystore.Load()
 	}
-	if pc.Provider == polish.Off {
-		fmt.Println("⚠️ 当前 polish_provider=off,先用 VOICE_INPUT_POLISH_PROVIDER=bailian(或 ollama)指定通道")
+	if pc.BailianAPIKey == "" {
+		fmt.Println("⚠️ 未配置百炼 API Key(config/钥匙串均无),润色无从谈起")
 		os.Exit(2)
 	}
-	if pc.Provider == polish.Ollama {
-		fmt.Println("预热本地模型(冷载可能 ~15s)……")
-		if err := polish.WarmUp(pc); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ 预热失败(%v):Ollama 是否在运行?模型是否已拉取?\n", err)
-			os.Exit(1)
-		}
-	}
-	modelName := pc.Model
-	if modelName == "" {
-		modelName = map[polish.Provider]string{
-			polish.Ollama: polish.DefaultOllamaModel, polish.Bailian: polish.DefaultBailianModel,
-		}[pc.Provider]
-	}
-	fmt.Printf("通道: %s  模型: %s\n输入: %s\n润色中……\n", pc.Provider, modelName, text)
+	fmt.Printf("云端模型: %s\n输入: %s\n润色中……\n",
+		orDefault(pc.Model, polish.DefaultBailianModel), text)
 	start := time.Now()
 	out, err := polish.Clean(context.Background(), pc, text)
 	elapsed := time.Since(start)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ 润色失败(%v):回退原文\n", err)
+		fmt.Fprintf(os.Stderr, "❌ 润色失败(%v):按设计将回退原文\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("输出: %s\n耗时: %v(输入 %d 字 → 输出 %d 字)\n",

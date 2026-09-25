@@ -40,18 +40,17 @@ type Config struct {
 	// DictationMode 听写模式:"streaming"(即时出字,默认)/ "sentence"(完整句,更准)。
 	DictationMode string `json:"dictation_mode"`
 
-	// PolishProvider 文字润色通道:"off"(默认)/ "ollama"(本地)/ "bailian"(云端)。
-	// 开启后听写文本先经 LLM 去口水词/补标点再打进输入框(缓冲分批,出字变一波一波)。
+	// PolishProvider 文字润色:"bailian"(默认开启)/ "off"(用户显式关闭)。
+	// 仅云端单通道(2026-09-25 裁决);实际生效还需百炼 Key——无 Key 时静默失效
+	// (输出原文),请求失败同样静默回退原文。
 	PolishProvider string `json:"polish_provider"`
-	// PolishModel 润色模型名;空 = 通道默认(bailian: qwen3.8-flash / ollama: qwen3.5:9b)。
+	// PolishModel 润色模型名;空 = qwen3.8-flash。
 	PolishModel string `json:"polish_model"`
-	// PolishOllamaURL 本地 Ollama 地址。
-	PolishOllamaURL string `json:"polish_ollama_url"`
 	// PolishMinChars 润色缓冲最小触发字数(句末标点时达到才冲刷),默认 20。
 	PolishMinChars int `json:"polish_min_chars"`
 	// PolishMaxChars 缓冲硬上限(达到即强制冲刷,哪怕在半句),默认 120。
 	PolishMaxChars int `json:"polish_max_chars"`
-	// PolishTimeoutMs 单次润色请求超时;0 = 通道默认(云端 3s / 本地 5s)。
+	// PolishTimeoutMs 单次润色请求超时;0 = 3s。
 	PolishTimeoutMs int `json:"polish_timeout_ms"`
 }
 
@@ -87,7 +86,7 @@ func defaultConfig() Config {
 		PttModifiers:    []string{"option"},
 		PttKey:          "space",
 		DictationMode:   "streaming",
-		PolishProvider:  "off",
+		PolishProvider:  "bailian",
 		PolishMinChars:  20,
 		PolishMaxChars:  120,
 	}
@@ -127,9 +126,6 @@ func Load() Config {
 	}
 	if v := os.Getenv("VOICE_INPUT_POLISH_MODEL"); v != "" {
 		cfg.PolishModel = v
-	}
-	if v := os.Getenv("VOICE_INPUT_POLISH_OLLAMA_URL"); v != "" {
-		cfg.PolishOllamaURL = v
 	}
 	return cfg
 }

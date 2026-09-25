@@ -15,7 +15,6 @@ import (
 	"io"
 	"log"
 	"math"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,21 +88,20 @@ func segLoop() {
 // 单消费者保证文字顺序;调用方永不阻塞在 LLM 往返上。
 var polishCh = make(chan string, 8)
 
-// polishLoop 单消费者润色执行线:LLM 清理 → 打字;失败/异常回退原文。
-// 润色在途计入胶囊转换态(松手后的末次冲刷期间转圈不提前消失)。
+// polishLoop 单消费者润色执行线:云端清理 → 打字;失败/异常静默回退原文
+// (日志仅留一行排障痕迹,无弹窗无状态栏提示)。在途计入胶囊转换态
+// (松手后的末次冲刷期间转圈不提前消失)。
 func polishLoop(cfgFun func() polish.Config) {
 	for raw := range polishCh {
 		conv := capsule.BeginConvert()
 		out, err := polish.Clean(context.Background(), cfgFun(), raw)
-		switch {
-		case err != nil:
-			appLog.Printf("⚠️ 润色失败(%v),回退原文", err)
+		if err == nil && !polish.SanityOK(raw, out) {
+			err = fmt.Errorf("输出异常缩短(%d→%d 字)", utf8.RuneCountInString(raw), utf8.RuneCountInString(out))
+		}
+		if err != nil {
+			appLog.Printf("✨润色不可用,已回退原文(%v)", err)
 			typeTextAsync(raw)
-		case !polish.SanityOK(raw, out):
-			appLog.Printf("⚠️ 润色输出异常缩短(%d→%d 字),回退原文", utf8.RuneCountInString(raw), utf8.RuneCountInString(out))
-			typeTextAsync(raw)
-		default:
-			appLog.Printf("✨ 润色:%q → %q", raw, out)
+		} else {
 			typeTextAsync(out)
 		}
 		conv()
@@ -164,18 +162,16 @@ type dictation struct {
 	polishMu  sync.Mutex // 保护 polishBuf
 	polishBuf string     // 待润色的原始识别文本缓冲
 
-	mStatus        *systray.MenuItem
-	mToggle        *systray.MenuItem
-	mDownload      *systray.MenuItem
-	mEngLocal      *systray.MenuItem
-	mEngCloud      *systray.MenuItem
-	mModeStream    *systray.MenuItem
-	mModeSentence  *systray.MenuItem
-	mTrigToggle    *systray.MenuItem
-	mTrigPtt       *systray.MenuItem
-	mPolishOff     *systray.MenuItem
-	mPolishOllama  *systray.MenuItem
-	mPolishBailian *systray.MenuItem
+	mStatus       *systray.MenuItem
+	mToggle       *systray.MenuItem
+	mDownload     *systray.MenuItem
+	mEngLocal     *systray.MenuItem
+	mEngCloud     *systray.MenuItem
+	mModeStream   *systray.MenuItem
+	mModeSentence *systray.MenuItem
+	mTrigToggle   *systray.MenuItem
+	mTrigPtt      *systray.MenuItem
+	mPolish       *systray.MenuItem // 文字润色(云端),勾选即生效
 
 	// 触发方式:toggle(组合键切换)/ ptt(按住说话)
 	hotkeyMode    atomic.Value // string
@@ -197,32 +193,25 @@ func (d *dictation) setEngine(e asr.Engine) {
 }
 
 // ---- 文字润色管线 ----
-// 开启时识别文本不直接打字:appendText 进缓冲,攒到边界(句末标点且≥min / 超 hard max /
-// 端点定稿 / 松手收尾)冲刷给 polishLoop,LLM 清理后打字。出字从"边说边出"变为
-// "攒一批出一波"——用户已确认接受该取舍(2026-09-23)。
+// 仅云端单通道(默认开启,2026-09-25 裁决)。识别文本不直接打字:appendText 进
+// 缓冲,攒到边界(句末标点且≥min / 超 hard max / 端点定稿 / 松手收尾)冲刷给
+// polishLoop,云端 LLM 清理后打字。优雅降级:未配置百炼 Key 时静默失效(输出
+// 原文),请求失败/超时同样静默回退原文——润色永不丢字、不弹窗、不打断听写。
 
-// polishOn 润色是否启用。
+// polishOn 润色是否实际生效:用户未关 + 百炼 Key 在手(无 Key 静默失效)。
+// 只读内存 cfg,不做钥匙串 IO(热路径;Key 的补读只在启动/切换时做一次)。
 func (d *dictation) polishOn() bool {
-	return d.cfg.PolishProvider != "" && d.cfg.PolishProvider != "off"
+	return d.cfg.PolishProvider == "bailian" && d.cfg.DashScopeAPIKey != ""
 }
 
-// polishCfg 装配润色通道配置(云端密钥即时补读钥匙串)。
+// polishCfg 装配润色通道配置。
 func (d *dictation) polishCfg() polish.Config {
-	c := polish.Config{
-		Provider:        polish.Provider(d.cfg.PolishProvider),
-		Model:           d.cfg.PolishModel,
-		OllamaURL:       d.cfg.PolishOllamaURL,
-		BailianAPIKey:   d.cfg.DashScopeAPIKey,
-		BailianBaseURL:  bailianBaseURL(d.cfg),
-		Timeout:         time.Duration(d.cfg.PolishTimeoutMs) * time.Millisecond,
+	return polish.Config{
+		Model:          d.cfg.PolishModel,
+		BailianAPIKey:  d.cfg.DashScopeAPIKey,
+		BailianBaseURL: bailianBaseURL(d.cfg),
+		Timeout:        time.Duration(d.cfg.PolishTimeoutMs) * time.Millisecond,
 	}
-	if c.Provider == polish.Bailian && c.BailianAPIKey == "" {
-		c.BailianAPIKey = d.cfg.DashScopeAPIKey
-		if c.BailianAPIKey == "" {
-			c.BailianAPIKey = keystore.Load()
-		}
-	}
-	return c
 }
 
 // bailianBaseURL 业务空间端点(有 workspace id 时),否则公共兼容模式。
@@ -345,14 +334,14 @@ func runApp() {
 	go typeLoop()
 	go segLoop()
 	go polishLoop(func() polish.Config { return d.polishCfg() })
-	if d.polishOn() && polish.Provider(d.cfg.PolishProvider) == polish.Ollama {
-		go func() { // 启动即预热,首条听写不挨冷载
-			if err := polish.WarmUp(d.polishCfg()); err != nil {
-				appLog.Printf("⚠️ 润色模型预热失败: %v", err)
-			} else {
-				appLog.Printf("🔥 润色模型已预热(%s)", orDefault(d.cfg.PolishModel, polish.DefaultOllamaModel))
-			}
-		}()
+	// 润色默认开启(云端):Key 只在配置/钥匙串里时补读一次,无 Key 静默失效
+	if d.cfg.PolishProvider != "off" && d.cfg.DashScopeAPIKey == "" {
+		if k := keystore.Load(); k != "" {
+			d.cfg.DashScopeAPIKey = k
+			appLog.Printf("✨ 文字润色已就绪(云端,Key 取自钥匙串)")
+		} else {
+			appLog.Printf("✨ 文字润色静默关闭:未配置百炼 API Key")
+		}
 	}
 	systray.Run(d.onReady, func() {})
 	appLog.Printf("== voice-input 退出 ==")
@@ -592,11 +581,9 @@ func (d *dictation) onReady() {
 	d.mTrigToggle = mTrig.AddSubMenuItemCheckbox("组合键切换(Ctrl+Option+V)", "", !ptt)
 	d.mTrigPtt = mTrig.AddSubMenuItemCheckbox("按住说话(Option+空格)", "", ptt)
 
-	// 文字润色子菜单(关/本地 Ollama/云端百炼):开启后先去口水词再出字
-	mPolish := systray.AddMenuItem("文字润色", "")
-	d.mPolishOff = mPolish.AddSubMenuItemCheckbox("关闭(原始输出)", "", !d.polishOn())
-	d.mPolishOllama = mPolish.AddSubMenuItemCheckbox("本地(Ollama·离线)", "qwen3.5:9b;需本地 Ollama 运行", d.cfg.PolishProvider == "ollama")
-	d.mPolishBailian = mPolish.AddSubMenuItemCheckbox("云端(百炼·qwen3.8-flash)", "更快更稳;复用云端引擎的 API Key", d.cfg.PolishProvider == "bailian")
+	// 文字润色(云端,默认开启):无 Key 时静默失效,勾选状态反映实际可用性
+	d.mPolish = systray.AddMenuItemCheckbox("文字润色(云端·去口水词)", "",
+		d.polishOn())
 
 	mAX := systray.AddMenuItem("请求辅助功能授权…", "")
 	mHelp := systray.AddMenuItem("❓ 使用帮助", "")
@@ -622,12 +609,8 @@ func (d *dictation) onReady() {
 				go d.setHotkeyMode("toggle")
 			case <-d.mTrigPtt.ClickedCh:
 				go d.setHotkeyMode("ptt")
-			case <-d.mPolishOff.ClickedCh:
-				go d.setPolishProvider("off")
-			case <-d.mPolishOllama.ClickedCh:
-				go d.setPolishProvider("ollama")
-			case <-d.mPolishBailian.ClickedCh:
-				go d.setPolishProvider("bailian")
+			case <-d.mPolish.ClickedCh:
+				go d.togglePolish()
 			case <-mHelp.ClickedCh:
 				go d.showHelp()
 			case <-mAX.ClickedCh:
@@ -1042,89 +1025,39 @@ func (d *dictation) syncTrigMenu() {
 	}
 }
 
-// probeOllama 探测本地 Ollama 可达性(1.5s 超时)。
-func probeOllama(url string) error {
-	if url == "" {
-		url = polish.DefaultOllamaURL
-	}
-	client := &http.Client{Timeout: 1500 * time.Millisecond}
-	resp, err := client.Get(url + "/api/tags")
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-// setPolishProvider 菜单切换润色通道;切换前探测可用性,失败则保持原通道并提示。
-func (d *dictation) setPolishProvider(p string) {
-	if p == d.cfg.PolishProvider {
-		d.syncPolishMenu()
-		return
-	}
-	switch p {
-	case "ollama":
-		if err := probeOllama(d.cfg.PolishOllamaURL); err != nil {
-			appLog.Printf("⚠️ Ollama 不可达: %v", err)
-			d.setStatus("❌ 本地润色不可用:Ollama 未运行?(ollama serve)")
-			showDialog("voice-input · 本地润色不可用",
-				[]string{"本地润色需要 Ollama 正在运行且已拉取 " + polish.DefaultOllamaModel,
-					"启动:终端执行 ollama serve(或打开 Ollama 应用)",
-					"拉取模型:ollama pull " + polish.DefaultOllamaModel},
-				[]string{"好"}, "好")
-			d.syncPolishMenu()
-			return
-		}
-		// 异步预热:把模型冷载消化在听写开始之前(成功请求已带 keep_alive 30m)
-		go func() {
-			if err := polish.WarmUp(d.polishCfg()); err != nil {
-				appLog.Printf("⚠️ 润色模型预热失败: %v", err)
-			} else {
-				appLog.Printf("🔥 润色模型已预热(%s)", orDefault(d.cfg.PolishModel, polish.DefaultOllamaModel))
-			}
-		}()
-	case "bailian":
+// togglePolish 菜单勾切换润色。开启条件=百炼 Key 在手;无 Key 静默保持关闭
+// (不弹窗,勾选框维持未勾,日志留痕)。关闭是用户显式选择,持久化。
+func (d *dictation) togglePolish() {
+	if d.cfg.PolishProvider != "off" {
+		d.cfg.PolishProvider = "off"
+		appLog.Printf("✨ 文字润色已关闭(原始输出)")
+	} else {
 		if d.cfg.DashScopeAPIKey == "" {
 			if k := keystore.Load(); k != "" {
 				d.cfg.DashScopeAPIKey = k
 			}
 		}
 		if d.cfg.DashScopeAPIKey == "" {
-			showDialog("voice-input · 云端润色需要 API Key",
-				[]string{"云端润色复用云端引擎的百炼 API Key。",
-					"请先在 菜单→切换引擎→云端 里配置 Key,再开启云端润色。"},
-				[]string{"好"}, "好")
+			appLog.Printf("✨ 润色保持关闭:未配置百炼 API Key(菜单→切换引擎→云端 可配置)")
 			d.syncPolishMenu()
 			return
 		}
+		d.cfg.PolishProvider = "bailian"
+		appLog.Printf("✨ 文字润色已开启(云端 %s)", orDefault(d.cfg.PolishModel, polish.DefaultBailianModel))
 	}
-	d.cfg.PolishProvider = p
 	d.syncPolishMenu()
-	_ = config.PatchConfig(map[string]any{"polish_provider": p})
-	if p == "off" {
-		appLog.Printf("✨ 文字润色已关闭(原始输出)")
-	} else {
-		appLog.Printf("✨ 文字润色已开启:%s(模型 %s)",
-			map[string]string{"ollama": "本地 Ollama", "bailian": "云端百炼"}[p],
-			orDefault(d.cfg.PolishModel, map[string]string{"ollama": polish.DefaultOllamaModel, "bailian": polish.DefaultBailianModel}[p]))
-	}
+	_ = config.PatchConfig(map[string]any{"polish_provider": d.cfg.PolishProvider})
 }
 
-// syncPolishMenu 润色子菜单勾选与实际配置一致。
+// syncPolishMenu 勾选状态与实际生效情况一致(无 Key 时即使配置开着也不勾)。
 func (d *dictation) syncPolishMenu() {
-	if d.mPolishOff == nil {
+	if d.mPolish == nil {
 		return
 	}
-	d.mPolishOff.Uncheck()
-	d.mPolishOllama.Uncheck()
-	d.mPolishBailian.Uncheck()
-	switch d.cfg.PolishProvider {
-	case "ollama":
-		d.mPolishOllama.Check()
-	case "bailian":
-		d.mPolishBailian.Check()
-	default:
-		d.mPolishOff.Check()
+	if d.polishOn() {
+		d.mPolish.Check()
+	} else {
+		d.mPolish.Uncheck()
 	}
 }
 
