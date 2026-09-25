@@ -23,7 +23,37 @@ var (
 	onPress    func()
 	onRelease  func()
 	callbackMu sync.Mutex
+
+	// extra 附加热键(slot1,如撤销上一句):配置存包级,
+	// 每次主 tap 创建/重建后自动重挂(热重配不丢)。
+	extraMask uint64
+	extraCode int
+	extraCB   func()
 )
+
+//export ht2OnPress
+func ht2OnPress() {
+	callbackMu.Lock()
+	f := extraCB
+	callbackMu.Unlock()
+	if f != nil {
+		go f()
+	}
+}
+
+// SetExtra 注册附加热键(toggle 语义,事件放行,不与听写热键互斥)。
+// 须在首次 Listen 之前调用;主 tap 热重配后自动重新挂载。
+func SetExtra(mods []string, key string, cb func()) error {
+	mask, code, err := parse(mods, key)
+	if err != nil {
+		return err
+	}
+	callbackMu.Lock()
+	extraMask, extraCode, extraCB = mask, code, cb
+	callbackMu.Unlock()
+	C.ht_add_watcher(C.ulonglong(mask), C.int(code))
+	return nil
+}
 
 //export htOnPress
 func htOnPress() {
@@ -117,6 +147,13 @@ func ListenPTT(mods []string, key string, onKeyDown, onKeyUp func(), onReady fun
 	}
 	if rc := C.ht_create_tap(C.ulonglong(mask), C.int(code), C.int(consume)); rc != 0 {
 		return fmt.Errorf("事件监听创建失败(检查 系统设置→隐私与安全性→辅助功能)")
+	}
+	// 主 tap 重建后重挂附加热键(撤销等),配置不因热重配丢失
+	callbackMu.Lock()
+	em, ec := extraMask, extraCode
+	callbackMu.Unlock()
+	if ec != 0 {
+		C.ht_add_watcher(C.ulonglong(em), C.int(ec))
 	}
 	if onReady != nil {
 		onReady()

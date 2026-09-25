@@ -84,6 +84,24 @@ func lastPunctSuffixOK(s string) bool {
 	return false
 }
 
+// applyVoiceCommands 保守层:整段恰为指令词才替换,嵌句字面保留。
+func TestApplyVoiceCommands(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"换行", "\n"},
+		{"换行。", "\n"},
+		{"另起一行", "\n"},
+		{" 另起一行。 ", "\n"},
+		{"我在文档里写了个换行标签", "我在文档里写了个换行标签"}, // 嵌句:字面
+		{"这个功能叫做换行", "这个功能叫做换行"},                     // 讨论指令词:字面
+		{"你好,世界。", "你好,世界。"},                             // 普通文本直过
+	}
+	for _, tc := range cases {
+		if got := applyVoiceCommands(tc.in); got != tc.want {
+			t.Fatalf("applyVoiceCommands(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestSalvageTail(t *testing.T) {
 	cases := []struct {
 		name      string

@@ -49,12 +49,36 @@ var appLog *log.Logger
 // typeCh 打字队列:所有 inject.TypeText 唯一入口,FIFO 保证文字顺序。
 var typeCh = make(chan string, 256)
 
-// typeLoop 单消费者打字执行线。
+// 撤销上一句:typeLoop 记录"打字单元"——连续注入(间隔<1.2s)合并为一个单元,
+// undoLast 退格删除最后一个单元。互斥保证退格与打字不交错。
+var (
+	injMu      sync.Mutex
+	typedUnits []typedUnit
+)
+
+type typedUnit struct {
+	text string
+	at   time.Time
+}
+
+const (
+	unitMergeWindow = 1200 * time.Millisecond // 单元合并窗口
+	maxTypedUnits   = 20
+)
+
 // axDropped 辅助功能失效时的节流标记:失效episode只记一行,不刷屏。
 var axDropped atomic.Bool
 
+// undoSentinel 撤销哨兵消息:撤销必须与打字同队列串行执行,
+// 否则退格会与在途文字交错(按撤销时队列里可能还有未落地的字)。
+const undoSentinel = "\x00undo"
+
 func typeLoop() {
 	for s := range typeCh {
+		if s == undoSentinel {
+			doUndo()
+			continue
+		}
 		// 静默跳过是远程排障黑洞:用户"没有任何文字出现"而日志一片空白。
 		// 每个失效episode只记一行(含被丢弃文本),恢复后重置。
 		if !inject.IsAccessibilityGranted() {
@@ -66,8 +90,71 @@ func typeLoop() {
 			continue
 		}
 		axDropped.Store(false)
+		injMu.Lock()
+		if n := len(typedUnits); n > 0 && time.Since(typedUnits[n-1].at) < unitMergeWindow {
+			typedUnits[n-1].text += s
+			typedUnits[n-1].at = time.Now()
+		} else {
+			typedUnits = append(typedUnits, typedUnit{s, time.Now()})
+			if len(typedUnits) > maxTypedUnits {
+				typedUnits = typedUnits[1:]
+			}
+		}
+		injMu.Unlock()
 		inject.TypeText(s)
 	}
+}
+
+// requestUndo 请求撤销上一句(菜单/热键调用;排队进打字线串行执行)。
+func requestUndo() {
+	select {
+	case typeCh <- undoSentinel:
+	default:
+		log.Printf("⚠️ 打字队列满,撤销请求丢弃")
+	}
+}
+
+// doUndo 在打字执行线上删除最后一个单元(此处必然无在途文字)。
+func doUndo() {
+	injMu.Lock()
+	n := len(typedUnits)
+	if n == 0 {
+		injMu.Unlock()
+		appLog.Printf("↩️ 撤销:没有可撤销的听写内容")
+		return
+	}
+	unit := typedUnits[n-1]
+	typedUnits = typedUnits[:n-1]
+	injMu.Unlock()
+	if !inject.IsAccessibilityGranted() {
+		appLog.Printf("↩️ 撤销失败:辅助功能权限未生效")
+		return
+	}
+	count := len([]rune(unit.text))
+	appLog.Printf("↩️ 撤销上一句(%d 字):%q", count, unit.text)
+	inject.Backspaces(count)
+}
+
+// voiceNewlineCmds 换行指令词(保守回退层,润色不可用时生效)。
+var voiceNewlineCmds = map[string]bool{"换行": true, "另起一行": true, "回车": true}
+
+// applyVoiceCommands 语音指令保守层:仅当整段(去首尾标点/空白)恰为指令词时
+// 才替换——宁漏勿错,嵌在句子里的"换行"一律按字面处理。上下文级判定由润色
+// LLM 承担(prompt 层),本函数只兜润色不可用/短句直出的路径。
+func applyVoiceCommands(s string) string {
+	core := strings.Trim(s, streamPuncts+" \n\t")
+	if voiceNewlineCmds[core] {
+		return "\n"
+	}
+	return s
+}
+
+// typeRawAsync 原始(未经润色)文本的打字入口:先过语音指令保守层再排队。
+func typeRawAsync(s string) {
+	if s == "" {
+		return
+	}
+	typeTextAsync(applyVoiceCommands(s))
 }
 
 // typeTextAsync 把一段文字排队打进焦点输入框(队列满时丢弃并记日志,理论上不会发生)。
@@ -112,7 +199,7 @@ func polishLoop(cfgFun func() polish.Config) {
 		}
 		if err != nil {
 			appLog.Printf("✨润色不可用,已回退原文(%v)", err)
-			typeTextAsync(raw)
+			typeRawAsync(raw)
 		} else {
 			appLog.Printf("✨ 润色:%q → %q", raw, out)
 			typeTextAsync(out)
@@ -256,7 +343,7 @@ func (d *dictation) appendText(s string) {
 	d.polishMu.Lock()
 	if !d.polishOn() {
 		d.polishMu.Unlock()
-		typeTextAsync(s)
+		typeRawAsync(s)
 		return
 	}
 	d.polishBuf += s
@@ -303,13 +390,13 @@ func (d *dictation) polishFlush(force bool) {
 	}
 	if !force && utf8.RuneCountInString(raw) < min {
 		appLog.Printf("↩️ 短句跳过润色直出:%q", raw)
-		typeTextAsync(raw)
+		typeRawAsync(raw)
 		return
 	}
 	select {
 	case polishCh <- raw:
 	default:
-		typeTextAsync(raw) // 队列满也不丢字
+		typeRawAsync(raw) // 队列满也不丢字
 	}
 }
 
@@ -323,7 +410,7 @@ func (d *dictation) polishReset() {
 	// 不能把残留丢弃——原文直出(不润色陈旧内容),一个字都不许少。
 	if raw != "" {
 		appLog.Printf("↩️ 上轮残留缓冲直出:%q", raw)
-		typeTextAsync(raw)
+		typeRawAsync(raw)
 	}
 }
 
@@ -366,6 +453,12 @@ func runApp() {
 	go typeLoop()
 	go segLoop()
 	go polishLoop(func() polish.Config { return d.polishCfg() })
+	// 撤销上一句热键(附加热键,slot1;须在 hotkeyLoop 首次建 tap 前注册)
+	if err := hotkey.SetExtra(cfg.UndoModifiers, orDefault(cfg.UndoKey, "z"), requestUndo); err != nil {
+		appLog.Printf("⚠️ 撤销热键注册失败(%v),菜单仍可撤销", err)
+	} else {
+		appLog.Printf("↩️ 撤销热键: %s+%s", fmtModifiers(cfg.UndoModifiers), orDefault(cfg.UndoKey, "z"))
+	}
 	// 润色默认开启(云端):Key 只在配置/钥匙串里时补读一次,无 Key 静默失效
 	if d.cfg.PolishProvider != "off" && d.cfg.DashScopeAPIKey == "" {
 		if k := keystore.Load(); k != "" {
@@ -614,6 +707,7 @@ func (d *dictation) onReady() {
 	d.mStatus = systray.AddMenuItem("启动中……", "")
 	d.mStatus.Disable()
 	d.mToggle = systray.AddMenuItem("暂停听写", "")
+	mUndo := systray.AddMenuItem("↩️ 撤销上一句", "")
 	d.mDownload = systray.AddMenuItem("⬇️ 下载缺失模型(约 230MB)", "")
 
 	// 引擎切换子菜单(本地/云端二选一)
@@ -646,6 +740,8 @@ func (d *dictation) onReady() {
 			select {
 			case <-d.mToggle.ClickedCh:
 				d.toggle()
+			case <-mUndo.ClickedCh:
+				requestUndo()
 			case <-d.mDownload.ClickedCh:
 				go d.downloadAndInit()
 			case <-d.mEngLocal.ClickedCh:

@@ -8,6 +8,7 @@ package inject
 #cgo LDFLAGS: -framework CoreGraphics -framework CoreFoundation -framework ApplicationServices
 #include <CoreGraphics/CGEvent.h>
 #include <ApplicationServices/ApplicationServices.h>
+#include <unistd.h>
 
 // postUnicodeChunk 以一次按键事件携带一段 Unicode 文本(≤20 字符)投递到会话。
 static void postUnicodeChunk(const uint16_t *text, int length) {
@@ -19,6 +20,19 @@ static void postUnicodeChunk(const uint16_t *text, int length) {
 	CGEventPost(kCGSessionEventTap, up);
 	CFRelease(down);
 	CFRelease(up);
+}
+
+// postBackspaces 连发 n 次退格(删除键,kVK_Delete=0x33),带小间隔防漏。
+static void postBackspaces(int n) {
+	for (int i = 0; i < n; i++) {
+		CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0x33, true);
+		CGEventRef up   = CGEventCreateKeyboardEvent(NULL, 0x33, false);
+		CGEventPost(kCGSessionEventTap, down);
+		CGEventPost(kCGSessionEventTap, up);
+		CFRelease(down);
+		CFRelease(up);
+		usleep(8000); // 8ms,与应用的按键处理节奏匹配
+	}
 }
 
 // requestAccessibility 返回当前是否已信任;prompt 非零时让系统弹出授权引导。
@@ -64,6 +78,14 @@ func TypeText(s string) {
 		}
 		C.postUnicodeChunk((*C.uint16_t)(&buf[0]), C.int(len(buf)))
 	}
+}
+
+// Backspaces 向焦点输入框连发 n 次退格(撤销上一句用)。
+func Backspaces(n int) {
+	if n <= 0 {
+		return
+	}
+	C.postBackspaces(C.int(n))
 }
 
 // RequestAccessibility 检查辅助功能权限;未授权时触发系统弹窗引导用户去设置。
