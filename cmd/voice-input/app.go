@@ -10,10 +10,12 @@ package main
 // 状态行提示"模型缺失",菜单提供一键下载,完成后自动开始听写。
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"fyne.io/systray"
 
@@ -31,6 +34,7 @@ import (
 	"voice_input/internal/hotkey"
 	"voice_input/internal/inject"
 	"voice_input/internal/keystore"
+	"voice_input/internal/polish"
 	"voice_input/internal/setup"
 	"voice_input/internal/vad"
 )
@@ -64,8 +68,9 @@ func typeTextAsync(s string) {
 	}
 }
 
-// segJob 一段待转写的音频(携带引擎快照,菜单热切换不影响在途任务)。
+// segJob 一段待转写的音频(携带引擎快照,菜单热切换不影响在途任务;d 供润色判断,CLI 下为 nil)。
 type segJob struct {
+	d   *dictation
 	eng asr.Engine
 	seg []float32
 }
@@ -76,7 +81,32 @@ var segCh = make(chan segJob, 64)
 // segLoop 单消费者转写执行线。
 func segLoop() {
 	for j := range segCh {
-		transcribeAndType(j.eng, j.seg)
+		transcribeAndType(j.d, j.eng, j.seg)
+	}
+}
+
+// polishCh 润色请求队列(开启润色时):原始识别文本进,润色后打字出。
+// 单消费者保证文字顺序;调用方永不阻塞在 LLM 往返上。
+var polishCh = make(chan string, 8)
+
+// polishLoop 单消费者润色执行线:LLM 清理 → 打字;失败/异常回退原文。
+// 润色在途计入胶囊转换态(松手后的末次冲刷期间转圈不提前消失)。
+func polishLoop(cfgFun func() polish.Config) {
+	for raw := range polishCh {
+		conv := capsule.BeginConvert()
+		out, err := polish.Clean(context.Background(), cfgFun(), raw)
+		switch {
+		case err != nil:
+			appLog.Printf("⚠️ 润色失败(%v),回退原文", err)
+			typeTextAsync(raw)
+		case !polish.SanityOK(raw, out):
+			appLog.Printf("⚠️ 润色输出异常缩短(%d→%d 字),回退原文", utf8.RuneCountInString(raw), utf8.RuneCountInString(out))
+			typeTextAsync(raw)
+		default:
+			appLog.Printf("✨ 润色:%q → %q", raw, out)
+			typeTextAsync(out)
+		}
+		conv()
 	}
 }
 
@@ -130,15 +160,22 @@ type dictation struct {
 	committed     string     // 已打进输入框的稳定前缀
 	lastPartial   string     // 上一次 partial(两次一致视为稳定)
 
-	mStatus       *systray.MenuItem
-	mToggle       *systray.MenuItem
-	mDownload     *systray.MenuItem
-	mEngLocal     *systray.MenuItem
-	mEngCloud     *systray.MenuItem
-	mModeStream   *systray.MenuItem
-	mModeSentence *systray.MenuItem
-	mTrigToggle   *systray.MenuItem
-	mTrigPtt      *systray.MenuItem
+	// 文字润色(开启时:识别文本先进缓冲,攒到边界经 LLM 清理再打字)
+	polishMu  sync.Mutex // 保护 polishBuf
+	polishBuf string     // 待润色的原始识别文本缓冲
+
+	mStatus        *systray.MenuItem
+	mToggle        *systray.MenuItem
+	mDownload      *systray.MenuItem
+	mEngLocal      *systray.MenuItem
+	mEngCloud      *systray.MenuItem
+	mModeStream    *systray.MenuItem
+	mModeSentence  *systray.MenuItem
+	mTrigToggle    *systray.MenuItem
+	mTrigPtt       *systray.MenuItem
+	mPolishOff     *systray.MenuItem
+	mPolishOllama  *systray.MenuItem
+	mPolishBailian *systray.MenuItem
 
 	// 触发方式:toggle(组合键切换)/ ptt(按住说话)
 	hotkeyMode    atomic.Value // string
@@ -157,6 +194,116 @@ func (d *dictation) setEngine(e asr.Engine) {
 	d.engineMu.Lock()
 	d.engine = e
 	d.engineMu.Unlock()
+}
+
+// ---- 文字润色管线 ----
+// 开启时识别文本不直接打字:appendText 进缓冲,攒到边界(句末标点且≥min / 超 hard max /
+// 端点定稿 / 松手收尾)冲刷给 polishLoop,LLM 清理后打字。出字从"边说边出"变为
+// "攒一批出一波"——用户已确认接受该取舍(2026-09-23)。
+
+// polishOn 润色是否启用。
+func (d *dictation) polishOn() bool {
+	return d.cfg.PolishProvider != "" && d.cfg.PolishProvider != "off"
+}
+
+// polishCfg 装配润色通道配置(云端密钥即时补读钥匙串)。
+func (d *dictation) polishCfg() polish.Config {
+	c := polish.Config{
+		Provider:        polish.Provider(d.cfg.PolishProvider),
+		Model:           d.cfg.PolishModel,
+		OllamaURL:       d.cfg.PolishOllamaURL,
+		BailianAPIKey:   d.cfg.DashScopeAPIKey,
+		BailianBaseURL:  bailianBaseURL(d.cfg),
+		Timeout:         time.Duration(d.cfg.PolishTimeoutMs) * time.Millisecond,
+	}
+	if c.Provider == polish.Bailian && c.BailianAPIKey == "" {
+		c.BailianAPIKey = d.cfg.DashScopeAPIKey
+		if c.BailianAPIKey == "" {
+			c.BailianAPIKey = keystore.Load()
+		}
+	}
+	return c
+}
+
+// bailianBaseURL 业务空间端点(有 workspace id 时),否则公共兼容模式。
+func bailianBaseURL(cfg config.Config) string {
+	if cfg.DashScopeWorkspaceID != "" {
+		return fmt.Sprintf("https://%s.%s.maas.aliyuncs.com/compatible-mode/v1",
+			cfg.DashScopeWorkspaceID, orDefault(cfg.Region, "cn-beijing"))
+	}
+	return ""
+}
+
+// appendText 识别文本唯一入口:润色关 = 直接打字;开 = 进缓冲并评估冲刷。
+func (d *dictation) appendText(s string) {
+	if s == "" {
+		return
+	}
+	d.polishMu.Lock()
+	if !d.polishOn() {
+		d.polishMu.Unlock()
+		typeTextAsync(s)
+		return
+	}
+	d.polishBuf += s
+	n := utf8.RuneCountInString(d.polishBuf)
+	max := d.cfg.PolishMaxChars
+	if max <= 0 {
+		max = 120
+	}
+	min := d.cfg.PolishMinChars
+	if min <= 0 {
+		min = 20
+	}
+	flush := n >= max ||
+		(n >= min && endsWithSentencePunct(d.polishBuf))
+	if !flush {
+		d.polishMu.Unlock()
+		return
+	}
+	raw := d.polishBuf
+	d.polishBuf = ""
+	d.polishMu.Unlock()
+	select {
+	case polishCh <- raw:
+	default: // 队列满(理论上不可能):塞回缓冲,下轮再冲
+		d.polishMu.Lock()
+		d.polishBuf = raw + d.polishBuf
+		d.polishMu.Unlock()
+	}
+}
+
+// polishFlush 冲刷缓冲去润色。force=false 时短于 min 的内容原样直出
+// (短句没有口水词可去,白等一次 LLM);force=true 一律走润色。
+func (d *dictation) polishFlush(force bool) {
+	d.polishMu.Lock()
+	raw := d.polishBuf
+	d.polishBuf = ""
+	d.polishMu.Unlock()
+	if raw == "" {
+		return
+	}
+	min := d.cfg.PolishMinChars
+	if min <= 0 {
+		min = 20
+	}
+	if !force && utf8.RuneCountInString(raw) < min {
+		appLog.Printf("↩️ 短句跳过润色直出:%q", raw)
+		typeTextAsync(raw)
+		return
+	}
+	select {
+	case polishCh <- raw:
+	default:
+		typeTextAsync(raw) // 队列满也不丢字
+	}
+}
+
+// polishReset 清空缓冲(开新听写轮时;内容属上一轮,不冲刷)。
+func (d *dictation) polishReset() {
+	d.polishMu.Lock()
+	d.polishBuf = ""
+	d.polishMu.Unlock()
 }
 
 // runApp 启动菜单栏应用;阻塞直至退出。
@@ -197,6 +344,16 @@ func runApp() {
 	go d.audioLoop()
 	go typeLoop()
 	go segLoop()
+	go polishLoop(func() polish.Config { return d.polishCfg() })
+	if d.polishOn() && polish.Provider(d.cfg.PolishProvider) == polish.Ollama {
+		go func() { // 启动即预热,首条听写不挨冷载
+			if err := polish.WarmUp(d.polishCfg()); err != nil {
+				appLog.Printf("⚠️ 润色模型预热失败: %v", err)
+			} else {
+				appLog.Printf("🔥 润色模型已预热(%s)", orDefault(d.cfg.PolishModel, polish.DefaultOllamaModel))
+			}
+		}()
+	}
 	systray.Run(d.onReady, func() {})
 	appLog.Printf("== voice-input 退出 ==")
 }
@@ -275,7 +432,14 @@ func (d *dictation) syncModeMenu() {
 
 // ---- 流式核心:喂音频 → 稳定前缀增量注入 → 端点定稿 ----
 
+// streamPuncts 流式提交与润色冲刷共用的句读标点集。
 var streamPuncts = "。?!;;、,.!?"
+
+// endsWithSentencePunct 文本是否以任一句读标点结尾(润色冲刷的边界信号)。
+func endsWithSentencePunct(s string) bool {
+	r := []rune(s)
+	return len(r) > 0 && strings.ContainsRune(streamPuncts, r[len(r)-1])
+}
 
 // streamFeed 流式模式处理一帧音频。
 func (d *dictation) streamFeed(pcm []float32) {
@@ -292,6 +456,7 @@ func (d *dictation) streamFeed(pcm []float32) {
 		final := d.streamSession.Finalize()
 		d.commitExact(final)
 		d.committed, d.lastPartial = "", ""
+		d.polishFlush(false) // 端点定稿:缓冲立即出(短句自动跳过润色直出)
 		if final != "" {
 			appLog.Printf("🎙 定稿:%s", final)
 		}
@@ -326,7 +491,7 @@ func (d *dictation) commitStable(partial string, reliable bool) {
 	if len(stable) > len(d.committed) && strings.HasPrefix(stable, d.committed) {
 		delta := stable[len(d.committed):]
 		if delta != "" && inject.IsAccessibilityGranted() {
-			typeTextAsync(delta) // 队列化:打字不阻塞音频线,顺序有保证
+			d.appendText(delta) // 润色开=进缓冲攒批;关=直接打字(顺序均保)
 			d.committed = stable
 		}
 	}
@@ -340,11 +505,11 @@ func (d *dictation) commitExact(final string) {
 	}
 	if strings.HasPrefix(final, d.committed) {
 		if delta := final[len(d.committed):]; delta != "" && inject.IsAccessibilityGranted() {
-			typeTextAsync(delta)
+			d.appendText(delta)
 		}
 	} else if d.committed == "" {
 		if inject.IsAccessibilityGranted() {
-			typeTextAsync(final)
+			d.appendText(final)
 		}
 	} else {
 		appLog.Printf("⚠️ 定稿与已提交不一致(保留已提交):已=%q 定=%q", d.committed, final)
@@ -427,6 +592,12 @@ func (d *dictation) onReady() {
 	d.mTrigToggle = mTrig.AddSubMenuItemCheckbox("组合键切换(Ctrl+Option+V)", "", !ptt)
 	d.mTrigPtt = mTrig.AddSubMenuItemCheckbox("按住说话(Option+空格)", "", ptt)
 
+	// 文字润色子菜单(关/本地 Ollama/云端百炼):开启后先去口水词再出字
+	mPolish := systray.AddMenuItem("文字润色", "")
+	d.mPolishOff = mPolish.AddSubMenuItemCheckbox("关闭(原始输出)", "", !d.polishOn())
+	d.mPolishOllama = mPolish.AddSubMenuItemCheckbox("本地(Ollama·离线)", "qwen3.5:9b;需本地 Ollama 运行", d.cfg.PolishProvider == "ollama")
+	d.mPolishBailian = mPolish.AddSubMenuItemCheckbox("云端(百炼·qwen3.8-flash)", "更快更稳;复用云端引擎的 API Key", d.cfg.PolishProvider == "bailian")
+
 	mAX := systray.AddMenuItem("请求辅助功能授权…", "")
 	mHelp := systray.AddMenuItem("❓ 使用帮助", "")
 	systray.AddSeparator()
@@ -451,6 +622,12 @@ func (d *dictation) onReady() {
 				go d.setHotkeyMode("toggle")
 			case <-d.mTrigPtt.ClickedCh:
 				go d.setHotkeyMode("ptt")
+			case <-d.mPolishOff.ClickedCh:
+				go d.setPolishProvider("off")
+			case <-d.mPolishOllama.ClickedCh:
+				go d.setPolishProvider("ollama")
+			case <-d.mPolishBailian.ClickedCh:
+				go d.setPolishProvider("bailian")
 			case <-mHelp.ClickedCh:
 				go d.showHelp()
 			case <-mAX.ClickedCh:
@@ -865,6 +1042,92 @@ func (d *dictation) syncTrigMenu() {
 	}
 }
 
+// probeOllama 探测本地 Ollama 可达性(1.5s 超时)。
+func probeOllama(url string) error {
+	if url == "" {
+		url = polish.DefaultOllamaURL
+	}
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	resp, err := client.Get(url + "/api/tags")
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// setPolishProvider 菜单切换润色通道;切换前探测可用性,失败则保持原通道并提示。
+func (d *dictation) setPolishProvider(p string) {
+	if p == d.cfg.PolishProvider {
+		d.syncPolishMenu()
+		return
+	}
+	switch p {
+	case "ollama":
+		if err := probeOllama(d.cfg.PolishOllamaURL); err != nil {
+			appLog.Printf("⚠️ Ollama 不可达: %v", err)
+			d.setStatus("❌ 本地润色不可用:Ollama 未运行?(ollama serve)")
+			showDialog("voice-input · 本地润色不可用",
+				[]string{"本地润色需要 Ollama 正在运行且已拉取 " + polish.DefaultOllamaModel,
+					"启动:终端执行 ollama serve(或打开 Ollama 应用)",
+					"拉取模型:ollama pull " + polish.DefaultOllamaModel},
+				[]string{"好"}, "好")
+			d.syncPolishMenu()
+			return
+		}
+		// 异步预热:把模型冷载消化在听写开始之前(成功请求已带 keep_alive 30m)
+		go func() {
+			if err := polish.WarmUp(d.polishCfg()); err != nil {
+				appLog.Printf("⚠️ 润色模型预热失败: %v", err)
+			} else {
+				appLog.Printf("🔥 润色模型已预热(%s)", orDefault(d.cfg.PolishModel, polish.DefaultOllamaModel))
+			}
+		}()
+	case "bailian":
+		if d.cfg.DashScopeAPIKey == "" {
+			if k := keystore.Load(); k != "" {
+				d.cfg.DashScopeAPIKey = k
+			}
+		}
+		if d.cfg.DashScopeAPIKey == "" {
+			showDialog("voice-input · 云端润色需要 API Key",
+				[]string{"云端润色复用云端引擎的百炼 API Key。",
+					"请先在 菜单→切换引擎→云端 里配置 Key,再开启云端润色。"},
+				[]string{"好"}, "好")
+			d.syncPolishMenu()
+			return
+		}
+	}
+	d.cfg.PolishProvider = p
+	d.syncPolishMenu()
+	_ = config.PatchConfig(map[string]any{"polish_provider": p})
+	if p == "off" {
+		appLog.Printf("✨ 文字润色已关闭(原始输出)")
+	} else {
+		appLog.Printf("✨ 文字润色已开启:%s(模型 %s)",
+			map[string]string{"ollama": "本地 Ollama", "bailian": "云端百炼"}[p],
+			orDefault(d.cfg.PolishModel, map[string]string{"ollama": polish.DefaultOllamaModel, "bailian": polish.DefaultBailianModel}[p]))
+	}
+}
+
+// syncPolishMenu 润色子菜单勾选与实际配置一致。
+func (d *dictation) syncPolishMenu() {
+	if d.mPolishOff == nil {
+		return
+	}
+	d.mPolishOff.Uncheck()
+	d.mPolishOllama.Uncheck()
+	d.mPolishBailian.Uncheck()
+	switch d.cfg.PolishProvider {
+	case "ollama":
+		d.mPolishOllama.Check()
+	case "bailian":
+		d.mPolishBailian.Check()
+	default:
+		d.mPolishOff.Check()
+	}
+}
+
 // toggle 切换听写状态。
 func (d *dictation) toggle() {
 	if d.listening.Load() {
@@ -919,10 +1182,11 @@ func (d *dictation) setListening(on bool) {
 			}
 			appLog.Printf("🎤 麦克风已打开")
 		}
-		// 丢弃暂停期间残留的音频与半句语音
+		// 丢弃暂停期间残留的音频与半句语音,润色缓冲同理(属上一轮的内容)
 		for len(d.audioCh) > 0 {
 			<-d.audioCh
 		}
+		d.polishReset()
 		// 整句模式才需要 VAD 断句;流式模式下 detector 为 nil,不得触碰
 		if !d.streamingMode.Load() && d.detector != nil {
 			d.detector.Reset()
@@ -970,12 +1234,13 @@ func (d *dictation) setListening(on bool) {
 				go func() {
 					defer conv()
 					for _, seg := range d.detector.Flush() {
-						segCh <- segJob{eng, seg}
+						segCh <- segJob{d, eng, seg}
 					}
 				}()
 			}
 		}
-		capsule.End() // 无在途计数时才走延迟隐藏(500ms)
+		d.polishFlush(false) // 缓冲里可能还压着未触发边界的文本,松手即出
+		capsule.End()        // 无在途计数时才走延迟隐藏(500ms)
 		appLog.Printf("⏸  听写已暂停(在途识别继续)")
 	}
 	d.refreshMenu()
@@ -1005,23 +1270,25 @@ func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 			if final != "" && granted {
 				if strings.HasPrefix(final, typed) {
 					if delta := final[len(typed):]; delta != "" {
-						typeTextAsync(delta)
+						d.appendText(delta)
 					}
 				} else if typed == "" {
-					typeTextAsync(final)
+					d.appendText(final)
 				} else {
 					appLog.Printf("⚠️ 定稿与已提交不一致(保留已提交):已=%q 定=%q", typed, final)
 				}
 			}
+			d.polishFlush(false)
 			return
 		}
 		if p := sess.Partial(); granted && strings.HasPrefix(p, typed) && len(p) > len(typed) {
-			typeTextAsync(p[len(typed):])
+			d.appendText(p[len(typed):])
 			typed = p
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
 	appLog.Printf("⚠️ 会话收尾超时(8s),丢弃未返回的尾部")
+	d.polishFlush(false)
 }
 
 // setStatus 显示状态行并更新文案(ptt 待机态整行隐藏,任何真实状态
@@ -1081,7 +1348,7 @@ func (d *dictation) audioLoop() {
 			continue
 		}
 		for _, seg := range d.detector.Feed(pcm) {
-			segCh <- segJob{eng, seg} // 转写(云端可达数秒)不阻塞音频线
+			segCh <- segJob{d, eng, seg} // 转写(云端可达数秒)不阻塞音频线
 		}
 	}
 }

@@ -7,12 +7,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"voice_input/internal/asr"
 	"voice_input/internal/capsule"
@@ -20,6 +22,7 @@ import (
 	"voice_input/internal/config"
 	"voice_input/internal/inject"
 	"voice_input/internal/keystore"
+	"voice_input/internal/polish"
 	"voice_input/internal/setup"
 	"voice_input/internal/vad"
 )
@@ -55,6 +58,12 @@ func main() {
 	case "capsuletest":
 		capsule.SelfTest()
 		fmt.Println("✅ 声音胶囊自检完成:波形 2s → 转换圈 1.2s → 隐藏(全程日志见上方)")
+	case "polishtest":
+		text := "呃那个我今天早上就是说想去嗯超市买一点水果然后顺便再买点牛奶"
+		if len(os.Args) >= 3 {
+			text = os.Args[2]
+		}
+		runPolishTest(text)
 	case "app":
 		runApp()
 	default:
@@ -72,9 +81,53 @@ func usage() {
   voice-input check          检查配置与模型文件是否就绪
   voice-input file <a.wav>   转写一个 WAV 文件(整句引擎)
   voice-input streamtest <a.wav>  流式引擎离线验证(打印 partial 演进与定稿)
+  voice-input polishtest [文本]   润色通道验证(按 config.polish_provider,默认样例文本)
   voice-input capsuletest         声音胶囊自检(波形→转换圈→隐藏)
   voice-input listen         常驻监听:说话→自动断句→文字打进焦点输入框
 `)
+}
+
+// runPolishTest 用当前配置的润色通道清理一段文本,打印输入/输出/耗时。
+// 云端 Key 优先 config,缺省自动补读钥匙串。
+func runPolishTest(text string) {
+	cfg := config.Load()
+	pc := polish.Config{
+		Provider:       polish.Provider(cfg.PolishProvider),
+		Model:          cfg.PolishModel,
+		OllamaURL:      cfg.PolishOllamaURL,
+		BailianAPIKey:  cfg.DashScopeAPIKey,
+		BailianBaseURL: bailianBaseURL(cfg),
+	}
+	if pc.Provider == polish.Bailian && pc.BailianAPIKey == "" {
+		pc.BailianAPIKey = keystore.Load()
+	}
+	if pc.Provider == polish.Off {
+		fmt.Println("⚠️ 当前 polish_provider=off,先用 VOICE_INPUT_POLISH_PROVIDER=bailian(或 ollama)指定通道")
+		os.Exit(2)
+	}
+	if pc.Provider == polish.Ollama {
+		fmt.Println("预热本地模型(冷载可能 ~15s)……")
+		if err := polish.WarmUp(pc); err != nil {
+			fmt.Fprintf(os.Stderr, "❌ 预热失败(%v):Ollama 是否在运行?模型是否已拉取?\n", err)
+			os.Exit(1)
+		}
+	}
+	modelName := pc.Model
+	if modelName == "" {
+		modelName = map[polish.Provider]string{
+			polish.Ollama: polish.DefaultOllamaModel, polish.Bailian: polish.DefaultBailianModel,
+		}[pc.Provider]
+	}
+	fmt.Printf("通道: %s  模型: %s\n输入: %s\n润色中……\n", pc.Provider, modelName, text)
+	start := time.Now()
+	out, err := polish.Clean(context.Background(), pc, text)
+	elapsed := time.Since(start)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ 润色失败(%v):回退原文\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("输出: %s\n耗时: %v(输入 %d 字 → 输出 %d 字)\n",
+		out, elapsed.Round(time.Millisecond), len([]rune(text)), len([]rune(out)))
 }
 
 // runStreamTest 用 WAV 文件离线验证流式引擎(本地或云端,按 config.Engine):
@@ -269,7 +322,7 @@ func runListen() {
 			return
 		case pcm := <-audioCh:
 			for _, seg := range detector.Feed(pcm) {
-				transcribeAndType(engine, seg)
+				transcribeAndType(nil, engine, seg) // CLI 无 dictation 实例,润色不生效
 			}
 		}
 	}
@@ -277,7 +330,8 @@ func runListen() {
 
 // transcribeAndType 转写一段语音并注入焦点输入框,打印状态行。
 // 打字走全局 typeCh 队列(保序、不阻塞调用方);识别期间胶囊持有 loading 态。
-func transcribeAndType(engine asr.Engine, seg []float32) {
+// 润色开启时:识别文本先经 LLM 清理(失败回退原文)再打字,均在转换态覆盖内。
+func transcribeAndType(d *dictation, engine asr.Engine, seg []float32) {
 	conv := capsule.BeginConvert()
 	defer conv()
 
@@ -290,11 +344,22 @@ func transcribeAndType(engine asr.Engine, seg []float32) {
 		return
 	}
 	log.Printf("🎙 %v 音频 → %v 识别:%s", dur.Round(time.Millisecond), elapsed.Round(time.Millisecond), text)
-	if text != "" {
-		if !inject.IsAccessibilityGranted() {
-			log.Printf("⚠️ 文字未注入:辅助功能权限未生效(系统设置→隐私与安全性→辅助功能→删除 VoiceInput 条目后重新授权)")
-			return
-		}
-		typeTextAsync(text)
+	if text == "" {
+		return
 	}
+	if !inject.IsAccessibilityGranted() {
+		log.Printf("⚠️ 文字未注入:辅助功能权限未生效(系统设置→隐私与安全性→辅助功能→删除 VoiceInput 条目后重新授权)")
+		return
+	}
+	if d != nil && d.polishOn() && utf8.RuneCountInString(text) >= d.cfg.PolishMinChars {
+		if out, perr := polish.Clean(context.Background(), d.polishCfg(), text); perr == nil && polish.SanityOK(text, out) {
+			log.Printf("✨ 润色:%q → %q", text, out)
+			text = out
+		} else if perr != nil {
+			log.Printf("⚠️ 润色失败(%v),回退原文", perr)
+		} else {
+			log.Printf("⚠️ 润色输出异常缩短,回退原文")
+		}
+	}
+	typeTextAsync(text)
 }
