@@ -1363,24 +1363,76 @@ func (d *dictation) audioLoop() {
 // (续说时句号→逗号),带标点锚点会全部失配(2026-09-25 实锤案例)。
 // 返回 (尾巴, 是否已和解):所有锚点都找不到(定稿被整体重写)才放弃。
 func salvageTail(committed, final string) (string, bool) {
-	fs := final
+	// 第一优先:字面锚点(全串;再去掉末字符——句尾标点常是被改写的那个)
 	cr := []rune(committed)
-	sources := [][]rune{cr}
-	if len(cr) > 1 {
-		sources = append(sources, cr[:len(cr)-1])
+	if tail, ok := tryAnchors(cr, final); ok {
+		return tail, true
 	}
-	for _, src := range sources {
+	if len(cr) > 1 {
+		if tail, ok := tryAnchors(cr[:len(cr)-1], final); ok {
+			return tail, true
+		}
+	}
+	// 第二优先:空格不敏感对齐——英文边界处云端会增删空格(partial " N" →
+	// 定稿 "NRO"),字面锚点全失配时按去空格文本匹配,命中后映射回原文位置
+	fStrip, fMap := stripSpaces(final)
+	cStrip, _ := stripSpaces(committed)
+	sr := []rune(cStrip)
+	for _, src := range [][]rune{sr, trimLastRune(sr)} {
 		for _, n := range []int{6, 4, 2} {
 			if len(src) < n {
 				continue
 			}
 			anchor := string(src[len(src)-n:])
-			if i := strings.LastIndex(fs, anchor); i >= 0 {
-				return fs[i+len(anchor):], true
+			i := strings.LastIndex(fStrip, anchor)
+			if i < 0 {
+				continue
 			}
+			riEnd := utf8.RuneCountInString(fStrip[:i]) + n // 锚点在去空格文本中的结束 rune 位
+			if riEnd >= len(fMap) {
+				return "", true // 锚点到达定稿末尾,无新内容
+			}
+			fr := []rune(final)
+			return string(fr[fMap[riEnd]:]), true
 		}
 	}
 	return "", false
+}
+
+// tryAnchors 取 src 末 n 字(n=6/4/2 逐级退化)在 final 中定位最后一次出现,
+// 返回其后内容;全部失配返回 false。
+func tryAnchors(src []rune, final string) (string, bool) {
+	for _, n := range []int{6, 4, 2} {
+		if len(src) < n {
+			continue
+		}
+		anchor := string(src[len(src)-n:])
+		if i := strings.LastIndex(final, anchor); i >= 0 {
+			return final[i+len(anchor):], true
+		}
+	}
+	return "", false
+}
+
+// stripSpaces 去掉空格,返回去空格文本 + 各 rune 在原文中的 rune 下标映射。
+func stripSpaces(s string) (string, []int) {
+	var b strings.Builder
+	m := []int{}
+	for i, r := range []rune(s) {
+		if r == ' ' {
+			continue
+		}
+		b.WriteRune(r)
+		m = append(m, i)
+	}
+	return b.String(), m
+}
+
+func trimLastRune(r []rune) []rune {
+	if len(r) > 1 {
+		return r[:len(r)-1]
+	}
+	return r
 }
 
 // commonPrefix 两个字符串的最长公共前缀(按 rune,避免切在多字节字符中间)。
