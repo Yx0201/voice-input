@@ -1,9 +1,88 @@
 package main
 
-// salvageTail 的用例全部来自 2026-09-25 真实用户日志中的吞字案例
-// (app.log "定稿与已提交不一致" 三连),回归保护:同样的回改不再丢尾巴。
+// salvageTail / lastPunctCut 的用例来自 2026-09-25 真实用户日志中的吞字与
+// 乱码案例(app.log"定稿与已提交不一致"三连 + "\xe3" 烂字节),回归保护。
 
-import "testing"
+import (
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
+
+func TestLastPunctCut(t *testing.T) {
+	cases := []struct {
+		name    string
+		partial string
+		want    string
+		wantOK  bool
+	}{
+		{
+			name:    "事故复现:中文句号是 3 字节,切分必须含完整 rune(曾经切出 \\xe3)",
+			partial: "哇哦，这看起来效果非常nice啊。",
+			want:    "哇哦，这看起来效果非常nice啊。",
+			wantOK:  true,
+		},
+		{
+			name:    "顿号同为 3 字节",
+			partial: "苹果、香蕉、梨",
+			want:    "苹果、香蕉、",
+			wantOK:  true,
+		},
+		{
+			name:    "ASCII 标点(旧实现在这里恰好正确)",
+			partial: "hello, world. next",
+			want:    "hello, world.",
+			wantOK:  true,
+		},
+		{
+			name:    "无标点",
+			partial: "没有标点的一段话",
+			want:    "",
+			wantOK:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := lastPunctCut(tc.partial)
+			if ok != tc.wantOK || got != tc.want {
+				t.Fatalf("got (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("切分结果含非法 UTF-8: %q", got)
+			}
+		})
+	}
+}
+
+// 事故不变量:任何 partial 的切分结果都必须是合法 UTF-8 且以标点结尾。
+func TestLastPunctCutNeverSplitsRunes(t *testing.T) {
+	partials := []string{
+		"短。",
+		"一句话带逗号，后面还有内容继续说",
+		"嗯、啊、呃就是说这个话题其实挺有意思的大家都在讨论呢",
+		"mixed ascii text. with 中文 words! 和标点?",
+	}
+	for _, p := range partials {
+		got, ok := lastPunctCut(p)
+		if ok && (!utf8.ValidString(got) || !strings.HasSuffix(got, "。") && !lastPunctSuffixOK(got)) {
+			t.Fatalf("切分 %q → %q 不是干净的标点边界", p, got)
+		}
+	}
+}
+
+func lastPunctSuffixOK(s string) bool {
+	r := []rune(s)
+	if len(r) == 0 {
+		return false
+	}
+	last := r[len(r)-1]
+	for _, p := range streamPuncts {
+		if last == p {
+			return true
+		}
+	}
+	return false
+}
 
 func TestSalvageTail(t *testing.T) {
 	cases := []struct {

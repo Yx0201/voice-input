@@ -41,6 +41,7 @@ import "C"
 
 // TypeText 把整段文本打进焦点输入框。
 // CGEvent 单事件携带的 Unicode 有实践上限,按 20 字符分块投递。
+// 非 BMP 字符(emoji 等)编码为 UTF-16 代理对——直接 uint16 截断会产生乱码。
 func TypeText(s string) {
 	runes := []rune(s)
 	const chunk = 20
@@ -50,9 +51,16 @@ func TypeText(s string) {
 			end = len(runes)
 		}
 		part := runes[i:end]
-		buf := make([]uint16, len(part))
-		for j, r := range part {
-			buf[j] = uint16(r)
+		buf := make([]uint16, 0, len(part)*2)
+		for _, r := range part {
+			if r > 0xFFFF {
+				r1 := r - 0x10000
+				buf = append(buf,
+					uint16(0xD800+(r1>>10)),
+					uint16(0xDC00+(r1&0x3FF)))
+			} else {
+				buf = append(buf, uint16(r))
+			}
 		}
 		C.postUnicodeChunk((*C.uint16_t)(&buf[0]), C.int(len(buf)))
 	}

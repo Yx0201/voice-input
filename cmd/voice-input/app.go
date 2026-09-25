@@ -102,6 +102,7 @@ func polishLoop(cfgFun func() polish.Config) {
 			appLog.Printf("✨润色不可用,已回退原文(%v)", err)
 			typeTextAsync(raw)
 		} else {
+			appLog.Printf("✨ 润色:%q → %q", raw, out)
 			typeTextAsync(out)
 		}
 		conv()
@@ -459,6 +460,20 @@ func (d *dictation) streamFeed(pcm []float32) {
 	}
 }
 
+// lastPunctCut 返回 partial 中最后一个句读标点(含)为止的稳定前缀。
+// 必须**按 rune**切:中文标点"。、;"是 3 字节,字节级 partial[:i+1] 会拦腰
+// 切断产生非法 UTF-8——2026-09-25 实锤事故:烂字节既打出不可见乱码,又让
+// 已提交文本永远无法与云端定稿前缀/锚点匹配,整条定稿被丢弃(吞一整段)。
+func lastPunctCut(partial string) (string, bool) {
+	pr := []rune(partial)
+	for i := len(pr) - 1; i >= 0; i-- {
+		if strings.ContainsRune(streamPuncts, pr[i]) {
+			return string(pr[:i+1]), true
+		}
+	}
+	return "", false
+}
+
 // commitStable 计算 partial 的稳定前缀并增量注入(永不回删)。
 // 稳定判定:① 最后一个句读标点之前(含);② 连续两次 partial 公共前缀(≥2 新字);
 // ③ 兜底:未提交部分超过 6 字时整段提交(防无标点长句迟迟不出字)。
@@ -468,10 +483,7 @@ func (d *dictation) commitStable(partial string, reliable bool) {
 	if partial == "" {
 		return
 	}
-	stable := ""
-	if i := strings.LastIndexAny(partial, streamPuncts); i >= 0 {
-		stable = partial[:i+1]
-	}
+	stable, _ := lastPunctCut(partial)
 	if reliable {
 		if stable == "" {
 			if cp := commonPrefix(d.lastPartial, partial); len([]rune(cp))-len([]rune(d.committed)) >= 2 {
