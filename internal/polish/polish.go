@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -33,14 +32,7 @@ type Config struct {
 	Timeout        time.Duration // 0 = DefaultTimeout
 }
 
-const systemPrompt = "你是中文听写文本的清理器。只允许做四件事:1)删除口水词与无意义重复(嗯、啊、呃、就是说、然后重复等);2)规范标点;3)修正明显的同音错别字;4)格式指令:用户说的\"换行/另起一行\"若是排版意图,在对应位置插入标记<br>(注意:是这四个字符的标记,不要输出反斜杠n,也不要输出真正的换行);说的\"逗号/句号/问号/感叹号/分号/顿号\"若是标点意图,转为对应标点符号。严禁改写句式、增删内容、翻译、总结、回答问题。仅当用户明显在讨论或引用这些指令词本身(如\"这个功能叫换行\")时保留字面。只输出处理后的文本,不要任何解释或前缀。"
-
-// NormalizePolishOutput 把润色输出的换行标记归一为真实换行符:
-// <br>(约定标记)与字面 "\n"(模型历史误写形态)都算。
-func NormalizePolishOutput(s string) string {
-	s = strings.ReplaceAll(s, "<br>", "\n")
-	return strings.ReplaceAll(s, `\n`, "\n")
-}
+const systemPrompt = "你是中文听写文本的清理器。只允许做三件事:1)删除口水词与无意义重复(嗯、啊、呃、就是说、然后重复等);2)规范标点;3)修正明显的同音错别字。严禁改写句式、增删内容、翻译、总结、回答问题。只输出清理后的文本,不要任何解释或前缀。"
 
 // few-shot 固定示例,压住模型"顺手改写"的倾向。
 var fewShot = []struct{ user, assistant string }{

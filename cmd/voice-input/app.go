@@ -135,28 +135,6 @@ func doUndo() {
 	inject.Backspaces(count)
 }
 
-// voiceNewlineCmds 换行指令词(保守回退层,润色不可用时生效)。
-var voiceNewlineCmds = map[string]bool{"换行": true, "另起一行": true, "回车": true}
-
-// applyVoiceCommands 语音指令保守层:仅当整段(去首尾标点/空白)恰为指令词时
-// 才替换——宁漏勿错,嵌在句子里的"换行"一律按字面处理。上下文级判定由润色
-// LLM 承担(prompt 层),本函数只兜润色不可用/短句直出的路径。
-func applyVoiceCommands(s string) string {
-	core := strings.Trim(s, streamPuncts+" \n\t")
-	if voiceNewlineCmds[core] {
-		return "\n"
-	}
-	return s
-}
-
-// typeRawAsync 原始(未经润色)文本的打字入口:先过语音指令保守层再排队。
-func typeRawAsync(s string) {
-	if s == "" {
-		return
-	}
-	typeTextAsync(applyVoiceCommands(s))
-}
-
 // typeTextAsync 把一段文字排队打进焦点输入框(队列满时丢弃并记日志,理论上不会发生)。
 func typeTextAsync(s string) {
 	select {
@@ -199,10 +177,10 @@ func polishLoop(cfgFun func() polish.Config) {
 		}
 		if err != nil {
 			appLog.Printf("✨润色不可用,已回退原文(%v)", err)
-			typeRawAsync(raw)
+			typeTextAsync(raw)
 		} else {
 			appLog.Printf("✨ 润色:%q → %q", raw, out)
-			typeTextAsync(polish.NormalizePolishOutput(out))
+			typeTextAsync(out)
 		}
 		conv()
 	}
@@ -343,7 +321,7 @@ func (d *dictation) appendText(s string) {
 	d.polishMu.Lock()
 	if !d.polishOn() {
 		d.polishMu.Unlock()
-		typeRawAsync(s)
+		typeTextAsync(s)
 		return
 	}
 	d.polishBuf += s
@@ -390,13 +368,13 @@ func (d *dictation) polishFlush(force bool) {
 	}
 	if !force && utf8.RuneCountInString(raw) < min {
 		appLog.Printf("↩️ 短句跳过润色直出:%q", raw)
-		typeRawAsync(raw)
+		typeTextAsync(raw)
 		return
 	}
 	select {
 	case polishCh <- raw:
 	default:
-		typeRawAsync(raw) // 队列满也不丢字
+		typeTextAsync(raw) // 队列满也不丢字
 	}
 }
 
@@ -410,7 +388,7 @@ func (d *dictation) polishReset() {
 	// 不能把残留丢弃——原文直出(不润色陈旧内容),一个字都不许少。
 	if raw != "" {
 		appLog.Printf("↩️ 上轮残留缓冲直出:%q", raw)
-		typeRawAsync(raw)
+		typeTextAsync(raw)
 	}
 }
 
