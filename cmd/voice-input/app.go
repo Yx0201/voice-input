@@ -202,7 +202,7 @@ func polishLoop(cfgFun func() polish.Config) {
 			typeRawAsync(raw)
 		} else {
 			appLog.Printf("✨ 润色:%q → %q", raw, out)
-			typeTextAsync(out)
+			typeTextAsync(polish.NormalizePolishOutput(out))
 		}
 		conv()
 	}

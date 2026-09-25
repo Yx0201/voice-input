@@ -10,6 +10,21 @@ package inject
 #include <ApplicationServices/ApplicationServices.h>
 #include <unistd.h>
 
+// postReturnKey 发一次带 Shift 修饰的回车(Shift+Enter 在备忘录/网页输入/
+// Chromium 聊天框里都是"换行"而非"发送";裸 \n 字符注入在聊天应用会触发发送)。
+static void postReturnKey(void) {
+	CGEventFlags flags = kCGEventFlagMaskShift;
+	CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0x24, true); // kVK_Return
+	CGEventRef up   = CGEventCreateKeyboardEvent(NULL, 0x24, false);
+	CGEventSetFlags(down, flags);
+	CGEventSetFlags(up, flags);
+	CGEventPost(kCGSessionEventTap, down);
+	CGEventPost(kCGSessionEventTap, up);
+	CFRelease(down);
+	CFRelease(up);
+	usleep(12000); // 给目标应用的处理留一点节奏
+}
+
 // postUnicodeChunk 以一次按键事件携带一段 Unicode 文本(≤20 字符)投递到会话。
 static void postUnicodeChunk(const uint16_t *text, int length) {
 	CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
@@ -54,17 +69,17 @@ static int checkAccessibility(int prompt) {
 import "C"
 
 // TypeText 把整段文本打进焦点输入框。
-// CGEvent 单事件携带的 Unicode 有实践上限,按 20 字符分块投递。
-// 非 BMP 字符(emoji 等)编码为 UTF-16 代理对——直接 uint16 截断会产生乱码。
+// 文本中的换行符不作为字符注入(聊天应用会触发发送、部分应用忽略),
+// 而是拆分文本:段间发一次 Shift+Return 键事件(见 postReturnKey 注释)。
+// 其余文本按 20 字符分块投递;非 BMP 字符(emoji 等)编码为 UTF-16 代理对。
 func TypeText(s string) {
 	runes := []rune(s)
 	const chunk = 20
-	for i := 0; i < len(runes); i += chunk {
-		end := i + chunk
-		if end > len(runes) {
-			end = len(runes)
+	start := 0
+	flush := func(part []rune) {
+		if len(part) == 0 {
+			return
 		}
-		part := runes[i:end]
 		buf := make([]uint16, 0, len(part)*2)
 		for _, r := range part {
 			if r > 0xFFFF {
@@ -78,6 +93,14 @@ func TypeText(s string) {
 		}
 		C.postUnicodeChunk((*C.uint16_t)(&buf[0]), C.int(len(buf)))
 	}
+	for i, r := range runes {
+		if r == '\n' {
+			flush(runes[start:i])
+			C.postReturnKey()
+			start = i + 1
+		}
+	}
+	flush(runes[start:])
 }
 
 // Backspaces 向焦点输入框连发 n 次退格(撤销上一句用)。
