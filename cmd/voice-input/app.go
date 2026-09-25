@@ -223,6 +223,8 @@ type dictation struct {
 	mPolish       *systray.MenuItem // 文字润色(云端),勾选即生效
 	mLangZh       *systray.MenuItem
 	mLangEn       *systray.MenuItem
+	mLangJa       *systray.MenuItem
+	mLangKo       *systray.MenuItem
 
 	// 触发方式:toggle(组合键切换)/ ptt(按住说话)
 	hotkeyMode    atomic.Value // string
@@ -252,16 +254,27 @@ func (d *dictation) setEngine(e asr.Engine) {
 // polishOn 润色是否实际生效:用户未关 + 百炼 Key 在手(无 Key 静默失效)。
 // 只读内存 cfg,不做钥匙串 IO(热路径;Key 的补读只在启动/切换时做一次)。
 func (d *dictation) polishOn() bool {
-	// 翻译输出(en)强制启用管线——即使润色开关被关,选了英文就得翻译;
+	// 翻译输出(en/ja/ko)强制启用管线——即使润色开关被关,选了翻译就得翻;
 	// 仍然受"有 Key"约束,无 Key 静默回退中文原文
-	if d.cfg.OutputLanguage == "en" {
+	if d.translating() {
 		return d.cfg.DashScopeAPIKey != ""
 	}
 	return d.cfg.PolishProvider == "bailian" && d.cfg.DashScopeAPIKey != ""
 }
 
-// translating 当前是否翻译输出模式。
-func (d *dictation) translating() bool { return d.cfg.OutputLanguage == "en" }
+// translating 当前是否翻译输出模式(目标语言 en/ja/ko)。
+func (d *dictation) translating() bool {
+	switch d.cfg.OutputLanguage {
+	case "en", "ja", "ko":
+		return true
+	}
+	return false
+}
+
+// langLabel 目标语言显示名(会话日志用)。
+func (d *dictation) langLabel() string {
+	return map[string]string{"en": "English", "ja": "日本語", "ko": "한국어"}[d.cfg.OutputLanguage]
+}
 
 // polishCfg 装配润色通道配置。
 func (d *dictation) polishCfg() polish.Config {
@@ -689,7 +702,9 @@ func (d *dictation) onReady() {
 	// 输出语言(翻译模式):English = 润色后翻译成英文输出
 	mLang := systray.AddMenuItem("输出语言", "")
 	d.mLangZh = mLang.AddSubMenuItemCheckbox("中文(默认)", "", !d.translating())
-	d.mLangEn = mLang.AddSubMenuItemCheckbox("English(说中文打英文)", "", d.translating())
+	d.mLangEn = mLang.AddSubMenuItemCheckbox("English", "", d.cfg.OutputLanguage == "en")
+	d.mLangJa = mLang.AddSubMenuItemCheckbox("日本語", "", d.cfg.OutputLanguage == "ja")
+	d.mLangKo = mLang.AddSubMenuItemCheckbox("한국어", "", d.cfg.OutputLanguage == "ko")
 
 	mAX := systray.AddMenuItem("请求辅助功能授权…", "")
 	mHelp := systray.AddMenuItem("❓ 使用帮助", "")
@@ -721,6 +736,10 @@ func (d *dictation) onReady() {
 				go d.setOutputLanguage("zh")
 			case <-d.mLangEn.ClickedCh:
 				go d.setOutputLanguage("en")
+			case <-d.mLangJa.ClickedCh:
+				go d.setOutputLanguage("ja")
+			case <-d.mLangKo.ClickedCh:
+				go d.setOutputLanguage("ko")
 			case <-mHelp.ClickedCh:
 				go d.showHelp()
 			case <-mAX.ClickedCh:
@@ -1142,7 +1161,7 @@ func (d *dictation) setOutputLanguage(lang string) {
 		d.syncLangMenu()
 		return
 	}
-	if lang == "en" {
+	if lang != "zh" {
 		if d.cfg.DashScopeAPIKey == "" {
 			if k := keystore.Load(); k != "" {
 				d.cfg.DashScopeAPIKey = k
@@ -1161,10 +1180,10 @@ func (d *dictation) setOutputLanguage(lang string) {
 	d.cfg.OutputLanguage = lang
 	d.syncLangMenu()
 	_ = config.PatchConfig(map[string]any{"output_language": lang})
-	if lang == "en" {
-		appLog.Printf("🌐 输出语言 → English(说中文,打英文)")
-	} else {
+	if lang == "zh" {
 		appLog.Printf("🌐 输出语言 → 中文(润色)")
+	} else {
+		appLog.Printf("🌐 输出语言 → %s(说中文,打%s)", d.langLabel(), d.langLabel())
 	}
 }
 
@@ -1173,12 +1192,19 @@ func (d *dictation) syncLangMenu() {
 	if d.mLangZh == nil {
 		return
 	}
-	if d.translating() {
+	d.mLangZh.Uncheck()
+	d.mLangEn.Uncheck()
+	d.mLangJa.Uncheck()
+	d.mLangKo.Uncheck()
+	switch d.cfg.OutputLanguage {
+	case "en":
 		d.mLangEn.Check()
-		d.mLangZh.Uncheck()
-	} else {
+	case "ja":
+		d.mLangJa.Check()
+	case "ko":
+		d.mLangKo.Check()
+	default:
 		d.mLangZh.Check()
-		d.mLangEn.Uncheck()
 	}
 }
 
@@ -1304,7 +1330,7 @@ func (d *dictation) setListening(on bool) {
 		appLog.Printf("🎤 听写已开启(%s|%s|%s|%s)",
 			map[bool]string{true: "流式", false: "整句"}[d.streamingMode.Load()],
 			engineLabel(d), map[bool]string{true: "润色开", false: "润色关"}[d.polishOn()],
-			map[bool]string{true: "English", false: "中文"}[d.translating()])
+			orDefault(d.langLabel(), "中文"))
 	} else {
 		d.listening.Store(false)
 
