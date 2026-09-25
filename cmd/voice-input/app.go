@@ -1319,17 +1319,25 @@ func (d *dictation) audioLoop() {
 // salvageTail 定稿尾部补救:云端定稿会回改早前文字(插/删标点、纠同音字),
 // 前缀匹配失败时不再把整条定稿丢弃,而是拿已提交文本末 n 字(6/4/2 逐级退化)
 // 作锚点在定稿中定位最后一次出现,其后即为本应续上的尾巴。
-// 返回 (尾巴, 是否已和解):找不到锚点(定稿被整体重写,无可靠对齐)才放弃。
+// 锚点候选额外包含"去掉末字符"版本:句尾标点常正是被云端改写的那个字
+// (续说时句号→逗号),带标点锚点会全部失配(2026-09-25 实锤案例)。
+// 返回 (尾巴, 是否已和解):所有锚点都找不到(定稿被整体重写)才放弃。
 func salvageTail(committed, final string) (string, bool) {
-	cr := []rune(committed)
 	fs := final
-	for _, n := range []int{6, 4, 2} {
-		if len(cr) < n {
-			continue
-		}
-		anchor := string(cr[len(cr)-n:])
-		if i := strings.LastIndex(fs, anchor); i >= 0 {
-			return fs[i+len(anchor):], true
+	cr := []rune(committed)
+	sources := [][]rune{cr}
+	if len(cr) > 1 {
+		sources = append(sources, cr[:len(cr)-1])
+	}
+	for _, src := range sources {
+		for _, n := range []int{6, 4, 2} {
+			if len(src) < n {
+				continue
+			}
+			anchor := string(src[len(src)-n:])
+			if i := strings.LastIndex(fs, anchor); i >= 0 {
+				return fs[i+len(anchor):], true
+			}
 		}
 	}
 	return "", false
