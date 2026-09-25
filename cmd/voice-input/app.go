@@ -49,13 +49,13 @@ var appLog *log.Logger
 // typeCh 打字队列:所有 inject.TypeText 唯一入口,FIFO 保证文字顺序。
 var typeCh = make(chan string, 256)
 
-// 撤销上一句:typeLoop 记录"打字单元"——单元 = 一次听写(一次按住 Option+空格)
-// 的全部出字,含松手后的收尾润色批次。setListening(true) 投递 unitBreak 哨兵
-// 开启新单元;单元内所有注入无条件合并(用户语义:"按下的一整段是一段话")。
+// 撤销打字单元:单元 = **一次润色输出批次**(2026-09-25 用户以具体场景拍板:
+// 按住期间润色分几段输出就记几段,撤销一段一段往回删;一次按住只说一句短话
+// 时,那一段就是完整内容)。串行化修复后,输入框每出现一段文字必然对应
+// 恰好一次润色输出,批次即天然单元。
 var (
 	injMu      sync.Mutex
 	typedUnits []typedUnit
-	unitOpen   bool // 当前听写轮的单元是否已开启
 	lastUndoAt time.Time
 )
 
@@ -65,7 +65,7 @@ type typedUnit struct {
 }
 
 const (
-	maxTypedUnits  = 20
+	maxTypedUnits  = 50
 	undoDebounceMs = 400 // 热键防抖(叠加 tap 层的自动重复过滤,双保险)
 )
 
@@ -74,21 +74,12 @@ var axDropped atomic.Bool
 
 // 撤销哨兵消息:撤销必须与打字同队列串行执行,
 // 否则退格会与在途文字交错(按撤销时队列里可能还有未落地的字)。
-const (
-	undoSentinel     = "\x00undo"
-	unitBreakSentinel = "\x00break" // 新听写轮开始:关闭当前撤销单元
-)
+const undoSentinel = "\x00undo"
 
 func typeLoop() {
 	for s := range typeCh {
 		if s == undoSentinel {
 			doUndo()
-			continue
-		}
-		if s == unitBreakSentinel {
-			injMu.Lock()
-			unitOpen = false // 下一段注入开新单元
-			injMu.Unlock()
 			continue
 		}
 		// 静默跳过是远程排障黑洞:用户"没有任何文字出现"而日志一片空白。
@@ -103,15 +94,9 @@ func typeLoop() {
 		}
 		axDropped.Store(false)
 		injMu.Lock()
-		if unitOpen && len(typedUnits) > 0 {
-			typedUnits[len(typedUnits)-1].text += s
-			typedUnits[len(typedUnits)-1].at = time.Now()
-		} else {
-			typedUnits = append(typedUnits, typedUnit{s, time.Now()})
-			if len(typedUnits) > maxTypedUnits {
-				typedUnits = typedUnits[1:]
-			}
-			unitOpen = true
+		typedUnits = append(typedUnits, typedUnit{s, time.Now()})
+		if len(typedUnits) > maxTypedUnits {
+			typedUnits = typedUnits[1:]
 		}
 		injMu.Unlock()
 		inject.TypeText(s)
@@ -1314,10 +1299,6 @@ func (d *dictation) setListening(on bool) {
 		}
 		d.listening.Store(true)
 		capsule.Begin() // 胶囊出现,显示波形
-		select {        // 新听写轮:撤销单元从零开始
-		case typeCh <- unitBreakSentinel:
-		default:
-		}
 		appLog.Printf("🎤 听写已开启(%s|%s|%s)",
 			map[bool]string{true: "流式", false: "整句"}[d.streamingMode.Load()],
 			engineLabel(d), map[bool]string{true: "润色开", false: "润色关"}[d.polishOn()])
