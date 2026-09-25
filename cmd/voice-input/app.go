@@ -50,11 +50,23 @@ var appLog *log.Logger
 var typeCh = make(chan string, 256)
 
 // typeLoop 单消费者打字执行线。
+// axDropped 辅助功能失效时的节流标记:失效episode只记一行,不刷屏。
+var axDropped atomic.Bool
+
 func typeLoop() {
 	for s := range typeCh {
-		if inject.IsAccessibilityGranted() {
-			inject.TypeText(s)
+		// 静默跳过是远程排障黑洞:用户"没有任何文字出现"而日志一片空白。
+		// 每个失效episode只记一行(含被丢弃文本),恢复后重置。
+		if !inject.IsAccessibilityGranted() {
+			if axDropped.CompareAndSwap(false, true) {
+				log.Printf("🚫 辅助功能权限失效,文字无法注入(丢弃:%q)——去 系统设置→隐私与安全性→辅助功能 重新开启", s)
+			} else {
+				log.Printf("🚫 辅助功能权限失效,丢弃:%q", s)
+			}
+			continue
 		}
+		axDropped.Store(false)
+		inject.TypeText(s)
 	}
 }
 
@@ -123,10 +135,22 @@ func feedLevel(pcm []float32) {
 	capsule.Level(math.Sqrt(sq/float64(len(pcm))) * 9) // 语音典型 0.02~0.15,增益 9 拉满
 }
 
+// buildStamp 构建时由 Makefile 注入 git 短 hash(-ldflags -X)。
+// 远程排障第一线索:用户发来的日志首行即定位其运行的确切代码版本。
+var buildStamp = "dev"
+
+// maxLogSize 日志轮转阈值:超过则 app.log → app.log.old(只留一代)。
+// 分发用户长期使用日志不能无限膨胀;"发日志给你"时也才有可发送的体积。
+const maxLogSize = 2 << 20 // 2MB
+
 func setupAppLog() {
 	dir := config.DefaultDir()
 	_ = os.MkdirAll(dir, 0o755)
-	f, err := os.OpenFile(filepath.Join(dir, "app.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	path := filepath.Join(dir, "app.log")
+	if st, err := os.Stat(path); err == nil && st.Size() > maxLogSize {
+		_ = os.Rename(path, filepath.Join(dir, "app.log.old"))
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		appLog = log.New(os.Stderr, "", log.LstdFlags)
 		return
@@ -306,7 +330,7 @@ func (d *dictation) polishReset() {
 // runApp 启动菜单栏应用;阻塞直至退出。
 func runApp() {
 	setupAppLog()
-	appLog.Printf("== voice-input 启动(版本 0.1.0)==")
+	appLog.Printf("== voice-input 启动(版本 0.1.0+%s)==", buildStamp)
 
 	cfg := config.Load()
 	appLog.Printf("配置: engine=%s model=%s hotkey=%v+%s",
@@ -1086,6 +1110,20 @@ func (d *dictation) syncPolishMenu() {
 	}
 }
 
+// engineLabel 当前引擎的短标签(日志用):本地/云端(带引擎名)。
+func engineLabel(d *dictation) string {
+	if d.streamingMode.Load() {
+		if d.streamEng == nil {
+			return "流式未就绪"
+		}
+		return d.streamEng.Name()
+	}
+	if e := d.currentEngine(); e != nil {
+		return e.Name()
+	}
+	return "引擎未就绪"
+}
+
 // toggle 切换听写状态。
 func (d *dictation) toggle() {
 	if d.listening.Load() {
@@ -1155,7 +1193,9 @@ func (d *dictation) setListening(on bool) {
 		}
 		d.listening.Store(true)
 		capsule.Begin() // 胶囊出现,显示波形
-		appLog.Printf("🎤 听写已开启")
+		appLog.Printf("🎤 听写已开启(%s|%s|%s)",
+			map[bool]string{true: "流式", false: "整句"}[d.streamingMode.Load()],
+			engineLabel(d), map[bool]string{true: "润色开", false: "润色关"}[d.polishOn()])
 	} else {
 		d.listening.Store(false)
 

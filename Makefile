@@ -13,8 +13,9 @@ tidy:
 	$(GO) mod tidy
 
 # 构建单二进制。CGO 必开(sherpa-onnx / malgo / 注入 都依赖 cgo)。
+# ldflags 把 git 短 hash 烧进二进制——远程排障时日志里的版本指纹是第一线索。
 build: tidy
-	CGO_ENABLED=1 $(GO) build -o $(BINARY) ./cmd/voice-input
+	CGO_ENABLED=1 $(GO) build -ldflags "-X main.buildStamp=$$(git rev-parse --short HEAD 2>/dev/null || echo dev)" -o $(BINARY) ./cmd/voice-input
 
 # 构建 + 环境自检
 run: build

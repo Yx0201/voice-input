@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -259,11 +260,14 @@ func (s *cloudStreamSession) writeJSON(m wsMessage) error {
 }
 
 // readLoop 独立 goroutine 消费服务端事件。
+// 断连/task-failed 必须留日志:它们触发"partial 升级定稿+即时端点"的静默兜底,
+// 不留痕迹的话远程排障无法与正常收尾区分(2026-09-25 排障结论)。
 func (s *cloudStreamSession) readLoop() {
 	defer s.wg.Done()
 	for {
 		_, raw, err := s.conn.ReadMessage()
 		if err != nil {
+			log.Printf("⚠️ 云端流式连接中断(收尾用已收到的部分文本): %v", err)
 			select {
 			case s.ready <- fmt.Errorf("连接中断: %w", err):
 			default:
@@ -313,6 +317,7 @@ func (s *cloudStreamSession) readLoop() {
 			return
 		case "task-failed":
 			err := fmt.Errorf("百炼任务失败 %s: %s", msg.Header.ErrorCode, msg.Header.ErrorMessage)
+			log.Printf("⚠️ %v", err)
 			select {
 			case s.ready <- err:
 			default:
