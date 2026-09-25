@@ -49,39 +49,11 @@ var appLog *log.Logger
 // typeCh 打字队列:所有 inject.TypeText 唯一入口,FIFO 保证文字顺序。
 var typeCh = make(chan string, 256)
 
-// 撤销打字单元:单元 = **一次润色输出批次**(2026-09-25 用户以具体场景拍板:
-// 按住期间润色分几段输出就记几段,撤销一段一段往回删;一次按住只说一句短话
-// 时,那一段就是完整内容)。串行化修复后,输入框每出现一段文字必然对应
-// 恰好一次润色输出,批次即天然单元。
-var (
-	injMu      sync.Mutex
-	typedUnits []typedUnit
-	lastUndoAt time.Time
-)
-
-type typedUnit struct {
-	text string
-	at   time.Time
-}
-
-const (
-	maxTypedUnits  = 50
-	undoDebounceMs = 400 // 热键防抖(叠加 tap 层的自动重复过滤,双保险)
-)
-
 // axDropped 辅助功能失效时的节流标记:失效episode只记一行,不刷屏。
 var axDropped atomic.Bool
 
-// 撤销哨兵消息:撤销必须与打字同队列串行执行,
-// 否则退格会与在途文字交错(按撤销时队列里可能还有未落地的字)。
-const undoSentinel = "\x00undo"
-
 func typeLoop() {
 	for s := range typeCh {
-		if s == undoSentinel {
-			doUndo()
-			continue
-		}
 		// 静默跳过是远程排障黑洞:用户"没有任何文字出现"而日志一片空白。
 		// 每个失效episode只记一行(含被丢弃文本),恢复后重置。
 		if !inject.IsAccessibilityGranted() {
@@ -93,49 +65,8 @@ func typeLoop() {
 			continue
 		}
 		axDropped.Store(false)
-		injMu.Lock()
-		typedUnits = append(typedUnits, typedUnit{s, time.Now()})
-		if len(typedUnits) > maxTypedUnits {
-			typedUnits = typedUnits[1:]
-		}
-		injMu.Unlock()
 		inject.TypeText(s)
 	}
-}
-
-// requestUndo 请求撤销上一句(菜单/热键调用;排队进打字线串行执行)。
-// 400ms 防抖:挡住手抖连击与系统按键重复(tap 层已滤自动重复,双保险)。
-func requestUndo() {
-	if time.Since(lastUndoAt) < undoDebounceMs*time.Millisecond {
-		return
-	}
-	lastUndoAt = time.Now()
-	select {
-	case typeCh <- undoSentinel:
-	default:
-		log.Printf("⚠️ 打字队列满,撤销请求丢弃")
-	}
-}
-
-// doUndo 在打字执行线上删除最后一个单元(此处必然无在途文字)。
-func doUndo() {
-	injMu.Lock()
-	n := len(typedUnits)
-	if n == 0 {
-		injMu.Unlock()
-		appLog.Printf("↩️ 撤销:没有可撤销的听写内容")
-		return
-	}
-	unit := typedUnits[n-1]
-	typedUnits = typedUnits[:n-1]
-	injMu.Unlock()
-	if !inject.IsAccessibilityGranted() {
-		appLog.Printf("↩️ 撤销失败:辅助功能权限未生效")
-		return
-	}
-	count := len([]rune(unit.text))
-	appLog.Printf("↩️ 撤销上一句(%d 字):%q", count, unit.text)
-	inject.Backspaces(count)
 }
 
 // typeTextAsync 把一段文字排队打进焦点输入框(队列满时丢弃并记日志,理论上不会发生)。
@@ -451,12 +382,6 @@ func runApp() {
 	go typeLoop()
 	go segLoop()
 	go polishLoop(func() polish.Config { return d.polishCfg() })
-	// 撤销上一句热键(附加热键,slot1;须在 hotkeyLoop 首次建 tap 前注册)
-	if err := hotkey.SetExtra(cfg.UndoModifiers, orDefault(cfg.UndoKey, "z"), requestUndo); err != nil {
-		appLog.Printf("⚠️ 撤销热键注册失败(%v),菜单仍可撤销", err)
-	} else {
-		appLog.Printf("↩️ 撤销热键: %s+%s", fmtModifiers(cfg.UndoModifiers), orDefault(cfg.UndoKey, "z"))
-	}
 	// 润色默认开启(云端):Key 只在配置/钥匙串里时补读一次,无 Key 静默失效
 	if d.cfg.PolishProvider != "off" && d.cfg.DashScopeAPIKey == "" {
 		if k := keystore.Load(); k != "" {
@@ -715,7 +640,6 @@ func (d *dictation) onReady() {
 	d.mStatus = systray.AddMenuItem("启动中……", "")
 	d.mStatus.Disable()
 	d.mToggle = systray.AddMenuItem("暂停听写", "")
-	mUndo := systray.AddMenuItem("↩️ 撤销上一句", "")
 	d.mDownload = systray.AddMenuItem("⬇️ 下载缺失模型(约 230MB)", "")
 
 	// 引擎切换子菜单(本地/云端二选一)
@@ -748,8 +672,6 @@ func (d *dictation) onReady() {
 			select {
 			case <-d.mToggle.ClickedCh:
 				d.toggle()
-			case <-mUndo.ClickedCh:
-				requestUndo()
 			case <-d.mDownload.ClickedCh:
 				go d.downloadAndInit()
 			case <-d.mEngLocal.ClickedCh:

@@ -43,19 +43,6 @@ void clipClear(void) {
 	[[NSPasteboard generalPasteboard] clearContents];
 }
 
-// postBackspaces 连发 n 次退格(删除键,kVK_Delete=0x33),带节奏防丢。
-void postBackspaces(int n) {
-	for (int i = 0; i < n; i++) {
-		CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0x33, true);
-		CGEventRef up   = CGEventCreateKeyboardEvent(NULL, 0x33, false);
-		CGEventPost(kCGSessionEventTap, down);
-		CGEventPost(kCGSessionEventTap, up);
-		CFRelease(down);
-		CFRelease(up);
-		usleep(12000);
-	}
-}
-
 // checkAccessibility 返回当前是否已信任;prompt 非零时让系统弹出授权引导。
 int checkAccessibility(int prompt) {
 	if (!prompt) {

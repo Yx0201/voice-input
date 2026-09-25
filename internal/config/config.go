@@ -35,10 +35,6 @@ type Config struct {
 	PttModifiers []string `json:"ptt_modifiers"`
 	// PttKey 按住说话的主键(默认 "space")。
 	PttKey string `json:"ptt_key"`
-	// UndoModifiers 撤销上一句的修饰键(默认 ["ctrl","alt"])。
-	UndoModifiers []string `json:"undo_modifiers"`
-	// UndoKey 撤销上一句的主键(默认 "z")。
-	UndoKey string `json:"undo_key"`
 	// InputDevice 指定输入设备(设备名子串匹配,如 "AirPods");空 = 系统默认输入。
 	InputDevice string `json:"input_device"`
 	// DictationMode 听写模式:"streaming"(即时出字,默认)/ "sentence"(完整句,更准)。
@@ -89,8 +85,6 @@ func defaultConfig() Config {
 		HotkeyMode:      "toggle",
 		PttModifiers:    []string{"option"},
 		PttKey:          "space",
-		UndoModifiers:   []string{"ctrl", "alt"},
-		UndoKey:         "z",
 		DictationMode:   "streaming",
 		PolishProvider:  "bailian",
 		PolishMinChars:  20,

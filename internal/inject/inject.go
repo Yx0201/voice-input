@@ -44,14 +44,6 @@ func TypeText(s string) {
 	}
 }
 
-// Backspaces 向焦点输入框连发 n 次退格(撤销上一句用)。
-func Backspaces(n int) {
-	if n <= 0 {
-		return
-	}
-	C.postBackspaces(C.int(n))
-}
-
 // RequestAccessibility 检查辅助功能权限;未授权时触发系统弹窗引导用户去设置。
 func RequestAccessibility() bool {
 	return C.checkAccessibility(1) == 1
