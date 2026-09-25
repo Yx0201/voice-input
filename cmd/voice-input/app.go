@@ -545,7 +545,9 @@ func (d *dictation) commitExact(final string) {
 			d.appendText(final)
 		}
 	} else if tail, ok := salvageTail(d.committed, final); ok {
-		if tail != "" && inject.IsAccessibilityGranted() {
+		// 补救尾巴若只是重复的句读标点(云端把上轮已打的句尾收编进定稿),
+		// 不再打进输入框——用户看到的"句首一个。"就是它(2026-09-25 案例)
+		if strings.Trim(tail, streamPuncts+" ") != "" && inject.IsAccessibilityGranted() {
 			appLog.Printf("🔧 定稿尾部补救(云端回改致前缀失配):+%q", tail)
 			d.appendText(tail)
 		}
@@ -1273,7 +1275,8 @@ func (d *dictation) drainSession(sess asr.StreamingSession, startTyped string) {
 				} else if typed == "" {
 					d.appendText(final)
 				} else if tail, ok := salvageTail(typed, final); ok {
-					if tail != "" {
+					// 孤标点尾巴(重复句读)不打入——见 commitExact 同款注释
+					if strings.Trim(tail, streamPuncts+" ") != "" {
 						appLog.Printf("🔧 定稿尾部补救(云端回改致前缀失配):+%q", tail)
 						d.appendText(tail)
 					}
