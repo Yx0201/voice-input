@@ -35,6 +35,8 @@ static void postUnicodeChunk(const uint16_t *text, int length) {
 	CGEventPost(kCGSessionEventTap, up);
 	CFRelease(down);
 	CFRelease(up);
+	usleep(12000); // 块间节奏:零间隔连发会被 Chromium 类输入框静默丢事件
+	               // (2026-09-25 实测:56字批次丢7字,撤销按账本退格多吃进上一段)
 }
 
 // postBackspaces 连发 n 次退格(删除键,kVK_Delete=0x33),带小间隔防漏。
