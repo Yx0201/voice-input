@@ -40,12 +40,6 @@ static CGEventRef ht_callback(CGEventTapProxy proxy, CGEventType type,
     if (type != kCGEventKeyDown && type != kCGEventKeyUp) {
         return event;
     }
-    // 按键自动重复只对 keyDown 有意义且只应触发一次动作:
-    // 撤销热键若被按住,系统 ~15Hz 的重复会连发撤销清空全部单元(实测事故)。
-    if (type == kCGEventKeyDown &&
-        CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) != 0) {
-        return event;
-    }
 
     CGEventFlags flags = CGEventGetFlags(event);
     CGKeyCode code = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
@@ -60,7 +54,7 @@ static CGEventRef ht_callback(CGEventTapProxy proxy, CGEventType type,
         if ((flags & w->mask) != w->mask || (flags & forbidden)) {
             continue;
         }
-        if (w->consume) { // ptt:吞掉,不到达任何应用
+        if (w->consume) { // ptt:吞掉,不到达任何应用(含按住期间的自动重复,否则漏空格)
             w->pairing = 1;
             if (type == kCGEventKeyDown) {
                 htOnPress();
@@ -70,11 +64,13 @@ static CGEventRef ht_callback(CGEventTapProxy proxy, CGEventType type,
             }
             return NULL;
         }
-        if (type == kCGEventKeyDown) { // toggle:按下回调,放行
-            if (i == 0) {
-                htOnPress();
-            } else {
-                ht2OnPress();
+        if (type == kCGEventKeyDown) { // toggle:按下回调,放行;自动重复只触发一次
+            if (CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) == 0) {
+                if (i == 0) {
+                    htOnPress();
+                } else {
+                    ht2OnPress();
+                }
             }
         }
         return event;
