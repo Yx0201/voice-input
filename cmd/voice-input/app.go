@@ -1213,8 +1213,21 @@ func (d *dictation) syncLangMenu() {
 func (d *dictation) togglePolish() {
 	if d.cfg.PolishProvider != "off" {
 		d.cfg.PolishProvider = "off"
-		appLog.Printf("✨ 文字润色已关闭(原始输出)")
-	} else {
+		// 翻译输出依赖润色管线;关润色 = 明确要"零云端 LLM",一并收掉翻译,
+		// 否则 polishOn() 被翻译模式强制为真,开关表现为"关不掉"
+		patch := map[string]any{"polish_provider": "off"}
+		if d.translating() {
+			d.cfg.OutputLanguage = "zh"
+			patch["output_language"] = "zh"
+			d.syncLangMenu()
+			appLog.Printf("🌐 翻译输出已随润色一并关闭(输出回中文)")
+		}
+		appLog.Printf("✨ 文字润色已关闭(原始输出;配合本地引擎 = 完全免费)")
+		d.syncPolishMenu()
+		_ = config.PatchConfig(patch)
+		return
+	}
+	if false {
 		if d.cfg.DashScopeAPIKey == "" {
 			if k := keystore.Load(); k != "" {
 				d.cfg.DashScopeAPIKey = k
